@@ -1,0 +1,11 @@
+
+include "system.in.init"
+
+read_restart "polym5200.restart"
+
+include "cleanedsystem.in.settings"
+
+variable s equal step
+print "Step $s"
+
+write_data restart.data

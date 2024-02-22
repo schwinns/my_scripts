@@ -1,0 +1,603 @@
+# Classes for reading a Gromacs topology file
+
+import numpy as np
+
+class AtomType:
+    '''Class to store atom type information'''
+    def __init__(self, line):
+
+        l = line.split()
+        self.type = l[0]
+        self.bondingtype = l[1]
+        self.atomic_number = int(l[2])
+        self.mass = float(l[3])
+        self.charge = float(l[4])
+        self.ptype = l[5]
+        self.sigma = float(l[6])   # nm
+        self.epsilon = float(l[7]) # kJ/mol
+
+
+    def __repr__(self):
+        return f'<AtomType {self.type}>'
+    
+
+    def __str__(self):
+        return f'{self.type}'
+
+
+class Bond:
+    '''Class to store bond information'''
+    def __init__(self, a1, a2, btype, params):
+
+        self.atoms = [a1, a2]
+        self.type = btype
+        self._params = params
+        
+        # parse parameters based on btype
+        # bond functional forms per Gromacs documentation
+        if btype == 1: # bond (i.e. harmonic)
+            self.b0 = params[0] # nm
+            self.kb = params[1] # kJ/mol/nm^2
+        elif btype == 2: # G96 bond
+            self.b0 = params[0] # nm
+            self.kb = params[1] # kJ/mol/nm^4
+        elif btype == 3: # Morse
+            self.b0 = params[0] # nm
+            self.D = params[1] # kJ/mol
+            self.beta = params[2] # nm^-1
+        elif btype == 4: # cubic bond
+            self.b0 = params[0] # nm
+            self.C2 = params[1] # kJ/mol/nm^2
+            self.C3 = params[2] # kJ/mol/nm^3
+        elif btype == 5: # connection
+            pass # no parameters
+        elif btype == 6: # harmonic potential
+            self.b0 = params[0] # nm
+            self.kb = params[1] # kJ/mol/nm^2
+        elif btype == 7: # FENE bond
+            self.bm = params[0] # nm
+            self.kb = params[1] # kJ/mol/nm^2
+        else:
+            raise TypeError(f'Bond type {btype} not implemented')
+
+
+    def __repr__(self):
+        return f'<Bond of type {self.type} between {self.atoms[0]} and {self.atoms[1]}>'
+    
+
+class Angle:
+    '''Class to store angle information'''
+    def __init__(self, a1, a2, a3, angtype, params):
+
+        self.atoms = [a1, a2, a3]
+        self.type = angtype
+        self._params = params
+        
+        # parse parameters based on angtype
+        # angle functional forms per Gromacs documentation
+        if angtype == 1: # angle (i.e. harmonic)
+            self.theta0 = params[0] # deg
+            self.ktheta = params[1] # kJ/mol/rad^2
+        elif angtype == 2: # G96 angle
+            self.theta0 = params[0] # deg
+            self.ktheta = params[1] # kJ/mol
+        elif angtype == 3: # cross bond-bond
+            self.r1e = params[0] # nm
+            self.r2e = params[1] # nm
+            self.krr = params[2] # kJ/mol/nm^2
+        elif angtype == 4: # cross bond-angle
+            self.r1e = params[0] # nm
+            self.r2e = params[1] # nm
+            self.r3e = params[2] # nm
+            self.krtheta = params[3] # kJ/mol/nm^2
+        elif angtype == 5: # Urey-Bradley
+            self.theta0 = params[0] # deg
+            self.ktheta = params[1] # kJ/mol/rad^2
+            self.r13 = params[2] # nm
+            self.kUB = params[3] # kJ/mol/nm^2
+        elif angtype == 6: # quartic angle
+            self.theta0 = params[0] # deg
+            self.C0 = params[1] # kJ/mol
+            self.C1 = params[2] # kJ/mol/rad
+            self.C2 = params[3] # kJ/mol/rad^2
+            self.C3 = params[4] # kJ/mol/rad^3
+            self.C4 = params[5] # kJ/mol/rad^4
+        else:
+            raise TypeError(f'Angle type {angtype} not implemented')
+
+
+    def __repr__(self):
+        return f'<Angle of type {self.type} between {self.atoms[0]}, {self.atoms[1]}, and {self.atoms[2]}>'
+
+
+class Dihedral:
+    '''Class to store angle information'''
+    def __init__(self, a1, a2, a3, a4, dihtype, params):
+
+        self.atoms = [a1, a2, a3, a4]
+        self.type = dihtype
+        self._params = params
+        
+        # parse parameters based on dihtype
+        # dihedral functional forms per Gromacs documentation
+        if dihtype == 1: # proper dihedral
+            self.phis = params[0] # deg
+            self.kphi = params[1] # kJ/mol
+            self.n = params[2] # multiplicity
+        elif dihtype == 2: # improper dihedral
+            self.ksee0 = params[0] # deg
+            self.kksee = params[1] # kJ/mol/rad^2
+        elif dihtype == 3: # Ryckaert-Bellemans dihedral
+            self.C0 = params[0] # kJ/mol
+            self.C1 = params[1] # kJ/mol
+            self.C2 = params[2] # kJ/mol
+            self.C3 = params[3] # kJ/mol
+            self.C4 = params[4] # kJ/mol
+            self.C5 = params[5] # kJ/mol
+        elif dihtype == 4: # periodic improper dihedral
+            self.phis = params[0] # deg
+            self.kphi = params[1] # kJ/mol
+            self.n = params[2] # multiplicity
+        elif dihtype == 5: # Fourier dihedral
+            self.C1 = params[0] # kJ/mol
+            self.C2 = params[1] # kJ/mol
+            self.C3 = params[2] # kJ/mol
+            self.C4 = params[3] # kJ/mol
+        elif dihtype == 9: # proper dihedral (multiple)
+            self.phis = params[0] # deg
+            self.kphi = params[1] # kJ/mol
+            self.n = params[2] # multiplicity
+        elif dihtype == 10: # restricted dihedral
+            self.phi0 = params[0] # deg
+            self.kphi = params[1] # kJ/mol
+        elif dihtype == 11: # combined bending-torsion potential
+            self.kphi = params[0] # kJ/mol
+            self.a0 = params[1]
+            self.a1 = params[2]
+            self.a2 = params[3]
+            self.a3 = params[4]
+            self.a4 = params[5]
+        else:
+            raise TypeError(f'Dihedral type {dihtype} not implemented')
+
+
+    def __repr__(self):
+        return f'<Dihedral of type {self.type} between {self.atoms[0]}, {self.atoms[1]}, {self.atoms[2]}, and {self.atoms[3]}>'
+
+
+class MolObj:
+    '''Generic class to store information about other topology directives'''
+    def __init__(self, atoms, ftype, params):
+
+        self.atoms = atoms
+        self.type = ftype
+        self._params = params
+
+    def __repr__(self):
+        rep = f'<MolObj of type {self.type} between {self.atoms[0]}'
+        for atom in self.atoms[1:]:
+            rep += f', {atom}'
+        rep += '>'
+        return rep
+
+    
+class Atom:
+    '''Class for an individual atom in the system'''
+    def __init__(self, idx, line):
+        
+        # save the atom index within the whole topology
+        self.idx = idx
+
+        # save all topology information
+        l = line.split()
+        self.num = int(l[0])
+        self.type = l[1]
+        self.resnum = int(l[2])
+        self.resname = l[3]
+        self.atomname = l[4]
+        self.cgnr = int(l[5])
+        self.charge = float(l[6])
+        self.mass = float(l[7])
+
+        # create lists for bonds, angles, dihedrals, etc.
+        self.bonds = []
+        self.angles = []
+        self.dihedrals = []
+        self.settles = []
+
+        # create an attribute for the AtomType and Molecule
+        self.atomtype = None
+        self.molecule = None
+
+
+    def __repr__(self):
+        return f'<Atom {self.idx} of type {self.atomtype} in Molecule {self.molecule}>'
+
+
+    def __str__(self):
+        return f'Atom {self.idx}'
+
+
+class Molecule:
+    '''Class for an individual molecule in the system'''
+    def __init__(self, name, number):
+
+        self.name = name
+        self.n_mols = number
+        self.nex = 3 # default value for number of bonds away to exclude non-bonded interactions
+        self.directives = []
+
+        
+    def __repr__(self):
+        return f'<Molecule {self.name} with {self.n_atoms} atoms>'
+
+
+    def __str__(self):
+        return f'{self.name}'
+
+
+    @property
+    def n_atoms(self):
+        return len(self.atoms)  
+
+    
+class GromacsTopology:
+    def __init__(self, top_file, verbose=False):
+    
+        self.gmx = 'gmx' # name of Gromacs executable
+        self.verbose = verbose
+    
+        # save information about original file
+        self.filename = top_file
+        self.original = open(top_file, 'r').readlines()
+        tmp = [line for line in self.original if not line.startswith(';')]
+        self.cleaned = [line for line in tmp if not len(line.split()) == 0]
+
+        # read included files and add to self.cleaned
+        incl_idx = [i for i,line in enumerate(self.cleaned) if line.startswith('#include')]
+        for idx in incl_idx:
+            incl_file = self.cleaned[idx].split('"')[1]
+            cleaned_top = self.cleaned[:idx]
+            cleaned_bott = self.cleaned[idx+1:]
+            incl = open(incl_file, 'r').readlines()
+            tmp = [line for line in incl if not line.startswith(';')]
+            incl_clean = [line for line in tmp if not len(line.split()) == 0]
+            self.cleaned = cleaned_top + incl_clean + cleaned_bott
+
+        # initialize some objects to store data
+        self.n_atoms = 0
+        self.atoms = []
+        self.molecules = []
+        self.bonds = []
+        self.angles = []
+        self.dihedrals = []
+
+        # read in directives
+        self.read_defaults()
+        self.read_atomtypes()
+        self.read_molecules()
+    
+        # read in each molecule
+        for mol in self.molecules:
+            idx = [i for i,line in enumerate(self.cleaned) if line.startswith(mol.name)][0]
+            self.read_moleculetype(mol, idx)
+
+        # convert lists into numpy arrays to access with indices
+        self.atoms = np.array(self.atoms)
+        self.molecules = np.array(self.molecules)
+        self.bonds = np.array(self.bonds)
+        self.angles = np.array(self.angles)
+        self.dihedrals = np.array(self.dihedrals)
+
+    
+    def _parse_atoms(self, molecule, lines):
+        '''Parse atoms and add to topology, molecule'''
+
+        setattr(molecule, 'atoms', [])
+
+        for line in lines:
+            self.n_atoms += 1
+            atom = Atom(self.n_atoms - 1, line)
+            atom.atomtype = self.atomtypes[atom.type]
+            atom.molecule = molecule
+            self.atoms.append(atom)
+            molecule.atoms.append(atom)
+
+        if self.verbose:
+            print(f'\nMolecule {molecule} has {len(molecule.atoms)} atoms')
+            
+
+    def _parse_bonds(self, molecule, lines):
+        '''Parse bonds and add to topology, atoms, molecule'''
+
+        setattr(molecule, 'bonds', [])
+        molecule.directives.append('bonds')
+        
+        for line in lines:
+            l = line.split()
+            
+            a1 = int(l[0])
+            a2 = int(l[1])
+            btype = int(l[2])
+            params = [float(p) for p in l[3:]]
+
+            atom1 = molecule.atoms[a1-1]
+            atom2 = molecule.atoms[a2-1]
+
+            bond = Bond(atom1, atom2, btype, params)
+            self.bonds.append(bond)
+            molecule.bonds.append(bond)
+            atom1.bonds.append(bond)
+            atom2.bonds.append(bond)
+
+        if self.verbose:
+            print(f'Molecule {molecule} has {len(molecule.bonds)} bonds')
+
+    
+    def _parse_angles(self, molecule, lines):
+        '''Parse angles and add to topology, atoms, molecule'''
+        
+        setattr(molecule, 'angles', [])
+        molecule.directives.append('angles')
+        
+        for line in lines:
+            l = line.split()
+            
+            a1 = int(l[0])
+            a2 = int(l[1])
+            a3 = int(l[2])
+            angtype = int(l[3])
+            params = [float(p) for p in l[4:]]
+
+            atom1 = molecule.atoms[a1-1]
+            atom2 = molecule.atoms[a2-1]
+            atom3 = molecule.atoms[a3-1]
+
+            angle = Angle(atom1, atom2, atom3, angtype, params)
+            self.angles.append(angle)
+            molecule.angles.append(angle)
+            atom1.angles.append(angle)
+            atom2.angles.append(angle)
+            atom3.angles.append(angle)
+            
+        if self.verbose:
+            print(f'Molecule {molecule} has {len(molecule.angles)} angles')
+        
+
+    def _parse_dihedrals(self, molecule, lines):
+        '''Parse dihedrals and add to topology, atoms, molecule'''
+        
+        setattr(molecule, 'dihedrals', [])
+        molecule.directives.append('dihedrals')
+        
+        for line in lines:
+            l = line.split()
+            
+            a1 = int(l[0])
+            a2 = int(l[1])
+            a3 = int(l[2])
+            a4 = int(l[3])
+            dihtype = int(l[4])
+            params = [float(p) for p in l[5:]]
+
+            atom1 = molecule.atoms[a1-1]
+            atom2 = molecule.atoms[a2-1]
+            atom3 = molecule.atoms[a3-1]
+            atom4 = molecule.atoms[a4-1]
+
+            dihedral = Dihedral(atom1, atom2, atom3, atom4, dihtype, params)
+            self.dihedrals.append(dihedral)
+            molecule.dihedrals.append(dihedral)
+            atom1.dihedrals.append(dihedral)
+            atom2.dihedrals.append(dihedral)
+            atom3.dihedrals.append(dihedral)
+            atom4.dihedrals.append(dihedral)
+            
+        if self.verbose:
+            print(f'Molecule {molecule} has {len(molecule.dihedrals)} dihedrals')
+
+    
+    def _parse_settles(self, molecule, lines):
+        '''Parse settles and add to atoms'''
+
+        setattr(molecule, 'settles', [])
+        molecule.directives.append('settles')
+    
+        for line in lines:
+            l = line.split()
+
+            atom = molecule.atoms[int(l[0])-1]
+            ftype = int(l[1])
+            params = [float(d) for d in l[2:]]
+
+            settle = MolObj([atom], ftype, params)
+
+            atom.settles = params
+            molecule.settles.append(settle)
+        
+        if self.verbose:
+            print(f'Molecule {molecule} has {len(molecule.settles)} SETTLES')
+
+
+    def _parse_exclusions(self, molecule, lines):
+        '''Parse exlcusions and add to atoms, molecule'''
+
+        setattr(molecule, 'exclusions', [])
+        molecule.directives.append('exclusions')
+
+        for line in lines:
+            atoms = [molecule.atoms[int(i)-1] for i in line.split()]
+            atom = atoms[0]
+            
+            params = []
+            ftype = ''
+
+            exclusion = MolObj(atoms, ftype, params)
+
+            atom.exclusions = atoms[1:]
+            molecule.exclusions.append(exclusion)
+
+        
+        if self.verbose:
+            print(f'Molecule {molecule} has {len(molecule.exclusions)} exclusions')
+    
+
+    def _parse_system(self, lines):
+        '''Parse system directive'''
+        
+        self.system = lines[0].split('\n')[0]
+    
+        if self.verbose:
+            print(f'\nFinished reading topology of system: {self.system}')
+
+
+    def read_defaults(self):
+        '''Read [ defaults ] directive from top file'''
+    
+        idx = self.cleaned.index('[ defaults ]\n')
+
+        line = self.cleaned[idx+1].split()
+        self.nbfunc = int(line[0])
+        self.comb_rule = int(line[1])
+        self.gen_pairs = line[2]
+        self.fudgeLJ = float(line[3])
+        self.fudgeQQ = float(line[4])
+    
+    
+    def read_atomtypes(self):
+        '''Read [ atomtypes ] directive from top file'''
+
+        print('\nWARNING: only reads atom types with sigma and epsilon parameters\n')
+    
+        idx = self.cleaned.index('[ atomtypes ]\n')
+    
+        self.atomtypes = {}
+        for line in self.cleaned[idx+1:]:
+            if line.startswith('['):
+                break
+            else:
+                atype = AtomType(line)
+                self.atomtypes[atype.type] = atype
+
+        if self.verbose:
+            print(f'{len(self.atomtypes)} atom types in the topology')
+
+
+    def read_molecules(self):
+        '''Read [ molecules ] directive from top file'''
+
+        idx = self.cleaned.index('[ molecules ]\n')
+
+        self.molecules = []
+        n_mols = 0
+        for line in self.cleaned[idx+1:]:
+            if line.startswith('['):
+                break
+            else:
+                mol = Molecule(line.split()[0], int(line.split()[1]))
+                self.molecules.append(mol)
+                n_mols += int(line.split()[1])
+    
+        print(f'{len(self.molecules)} molecule types in the topology for a total of {n_mols} molecules')
+
+
+    def read_moleculetype(self, molecule, idx):
+        '''Read all information for a given moleculetype (i.e. atoms, bonds, angles, dihedrals, etc.)'''
+
+        # get topology lines for molecule
+        idx_end = [i+idx for i,line in enumerate(self.cleaned[idx:]) if line.startswith('[ molecule')][0]
+        my_lines = self.cleaned[idx+1:idx_end]
+
+        # get indices of directives
+        dir_idx = [i for i,line in enumerate(my_lines) if line.startswith('[ ')]
+        dir_idx.append(len(my_lines)-1)
+
+        # add directives to molecule
+        for i,d in enumerate(dir_idx):
+            if my_lines[d].startswith('[ atoms ]'):
+                self._parse_atoms(molecule, my_lines[d+1:dir_idx[i+1]])
+            elif my_lines[d].startswith('[ bonds ]'):
+                self._parse_bonds(molecule, my_lines[d+1:dir_idx[i+1]])
+            elif my_lines[d].startswith('[ settles ]'):
+                self._parse_settles(molecule, my_lines[d+1:dir_idx[i+1]])
+            elif my_lines[d].startswith('[ angles ]'):
+                self._parse_angles(molecule, my_lines[d+1:dir_idx[i+1]])
+            elif my_lines[d].startswith('[ dihedrals ]'):
+                self._parse_dihedrals(molecule, my_lines[d+1:dir_idx[i+1]])
+            elif my_lines[d].startswith('[ exclusions ]'):
+                self._parse_exclusions(molecule, my_lines[d+1:dir_idx[i+1]])
+            elif my_lines[d].startswith('[ system ]'):
+                self._parse_system(my_lines[d+1:dir_idx[i+1]+1])
+            elif '[' in my_lines[d]:
+                dir_type = my_lines[d].split('[ ')[1].split(' ]')[0]
+                raise TypeError(f'Cannot parse directive type [ {dir_type} ]')
+
+
+    def write(self, filename):
+        '''Write the (possibly modified) topology'''
+
+        # open output file for writing
+        out = open(filename, 'w')
+
+        # write [ defaults ] directive
+        directive = ['[ defaults ]\n']
+        directive += f'\t{self.nbfunc}\t{self.comb_rule}\t{self.gen_pairs}\t{self.fudgeLJ}\t{self.fudgeQQ}\n'
+        directive += '\n'
+        out.writelines(directive)
+
+        # write [ atomtypes ] directive
+        directive = ['[ atomtypes ]\n']
+        for a in self.atomtypes:
+            at = self.atomtypes[a]
+            directive += f'{at.type:4s} {at.bondingtype:4s}\t{at.atomic_number:.0f}\t{at.mass:.8f}\t{at.charge:.8f}\tA\t{at.sigma:.8e}\t{at.epsilon:.8e}\n'
+
+        directive += '\n'
+        out.writelines(directive)
+
+        # loop through all molecules
+        for molecule in self.molecules:
+
+            # write [ moleculetype ] directive
+            directives = ['[ moleculetype ]\n']
+            directives += f'{molecule.name}\t\t{molecule.nex}\n'
+            directives += '\n'
+
+            # write [ atoms ] directive
+            directives += '[ atoms ]\n'
+            for atom in molecule.atoms:
+                directives += f'{atom.num:7d} {atom.type:4s}\t\t{atom.resnum} {atom.resname:8s} {atom.atomname:9s}\t{atom.cgnr:d}\t{atom.charge:.8f}\t{atom.mass:.8f}\n'
+
+            directives += '\n'
+
+            # write other molecule directives
+            for directive in molecule.directives:
+                directives += f'[ {directive} ]\n'
+                for mol_obj in getattr(molecule, directive):
+                    line = ''
+                    for atom in mol_obj.atoms:
+                        line += f'{atom.num:>7d}\t'
+                    
+                    line += f'{mol_obj.type}\t'
+                    for param in mol_obj._params:
+                        line += f'{param:.8e}\t'
+
+                    line += '\n'
+                    directives += line
+                
+                directives += '\n'
+            
+            out.writelines(directives)
+
+        # write [ system ] directive
+        directive = ['[ system ]\n']
+        directive += f'{self.system}\n'
+        directive += '\n'
+        out.writelines(directive)
+
+        # write [ molecules ] directive
+        directive = ['[ molecules ]\n']
+        for molecule in self.molecules:
+            directive += f'{molecule.name}\t{molecule.n_mols}\n'
+
+        out.writelines(directive)
+        print(f'Finished writing topology to {filename}!')

@@ -151,8 +151,8 @@ class EquilibriumAnalysis:
         ----------
         top : str
             Name of the topology file (e.g. tpr, gro, pdb)
-        traj : str
-            Name of the trajectory file (e.g. xtc)
+        traj : str or list of str
+            Name(s) of the trajectory file(s) (e.g. xtc)
         water : str
             MDAnalysis selection language for the water oxygen, default='type OW'
         cation : str
@@ -506,6 +506,93 @@ class UmbrellaSim:
         self.performance = tmp[0]
 
         return self.performance
+    
+
+    def create_Universe(self, top, traj=None, water='type OW', cation='resname NA', anion='resname CL'):
+        '''
+        Create an MDAnalysis Universe for the individual umbrella simulation.
+
+        Parameters
+        ----------
+        top : str
+            Name of the topology file (e.g. tpr, gro, pdb)
+        traj : str or list of str
+            Name(s) of the trajectory file(s) (e.g. xtc)
+        water : str
+            MDAnalysis selection language for the water oxygen, default='type OW'
+        cation : str
+            MDAnalysis selection language for the cation, default='resname NA'
+        anion : str
+            MDAnalysis selection language for the anion, default='resname CL'
+
+        Returns
+        -------
+        universe : MDAnalysis.Universe object
+            MDAnalysis Universe with the toplogy and coordinates for this umbrella
+
+        '''
+
+        self.universe = mda.Universe(top, traj)    
+
+        self.waters = self.universe.select_atoms(water)
+        self.cations = self.universe.select_atoms(cation)
+        self.anions = self.universe.select_atoms(anion)
+
+        if len(self.waters) == 0:
+            raise ValueError(f'No waters found with selection {water}')
+        if len(self.cations) == 0:
+            raise ValueError(f'No cations found with selection {cation}')
+        if len(self.anions) == 0:
+            raise ValueError(f'No anions found with selection {anion}')
+    
+        return self.universe
+
+
+    def initialize_Solute(self, ion, cutoff, step=1):
+        '''
+        Initialize the Solute object from SolvationAnalysis for the ion. Saves the solute
+        in attribute `solute`. 
+        
+        Parameters
+        ----------
+        ion : MDAnalysis.AtomGroup or str
+            Ion to create a Solute object for, if a str should be MDAnalysis selection language
+        cutoff : float
+            Hydration shell cutoff in Angstroms
+        step : int
+            Trajectory step for which to run the Solute
+
+        Returns
+        -------
+        solute : solvation_analysis.solute.Solute
+            SolvationAnalysis Solute object for `ion` with hydration shell `cutoff`
+            
+        '''
+
+        from solvation_analysis.solute import Solute
+
+        if isinstance(ion, str): # if provided selection language, make AtomGroup
+            g = self.universe.select_atoms(ion)
+        else: # else assume input is AtomGroup
+            g = ion
+
+        if g[0].charge > 0:
+            other_ions = self.cations - g
+            coions = self.anions
+            name = 'cation'
+        elif g[0].charge < 0:
+            other_ions = self.anions - g
+            coions = self.cations
+            name = 'anion'
+        else:
+            raise TypeError('Your ion is not charged, and so not an ion.')
+
+        
+        self.solute = Solute.from_atoms(g, {'water' : self.waters, 'ion' : other_ions, 'coion' : coions}, 
+                                        solute_name=name, radii={'water' : cutoff, 'ion' : cutoff, 'coion' : cutoff})
+        self.solute.run(step=step)
+
+        return self.solute
     
 
 class UmbrellaAnalysis:

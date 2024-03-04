@@ -293,7 +293,7 @@ class DiffusionCoefficient:
         return A*np.power(t, alpha)
     
 
-    def fit_power_law(self, initial_guess=[1,1], n_bootstraps=0, confidence=0.95):
+    def fit_power_law(self, initial_guess=[1,1], n_bootstraps=0, confidence=0.95, start_idx=0, end_idx=None):
         '''
         Fit power law to the MSD curve. MSD = A*t^alpha, where alpha = 1 is normal diffusion, alpha < 1 is 
         subdiffusion, and alpha > 1 is superdiffusion. 
@@ -303,9 +303,13 @@ class DiffusionCoefficient:
         initial_guess : array-like
             Initial guess for the power law parameters, A and alpha, default=[1,1]
         n_bootstraps : int
-            Number of bootstraps to calculate error in the power law parameters
+            Number of bootstraps to calculate error in the power law parameters, default=0
         confidence : float
             Confidence interval for bootstrapping, should be [0,1), default=0.95
+        start_idx : int
+            Starting index for the region to fit the MSD, default=0
+        end_idx : int
+            Ending index for the region to fit the MSD, default=None means end at 50% of the time lags
 
         Returns
         -------
@@ -317,9 +321,13 @@ class DiffusionCoefficient:
 
         '''
 
+        # parse inputs
+        if end_idx is None:
+            end_idx = int(self.lagtimes.shape[0]/2)
+
         # no bootstrapping
         if n_bootstraps == 0:
-            params, covariance = curve_fit(self._power_law_func, self.lagtimes, self.msd_ts, p0=initial_guess)
+            params, covariance = curve_fit(self._power_law_func, self.lagtimes[start_idx:end_idx], self.msd_ts[start_idx:end_idx], p0=initial_guess)
             self.A = params[0]
             self.alpha = params[1]
 
@@ -336,8 +344,8 @@ class DiffusionCoefficient:
                 rng = np.random.default_rng()
                 indices = rng.integers(0, len(self.selection.residues), len(self.selection.residues)) 
                 self.msd_boots[:,b] = self.msds_by_particle[:,indices].mean(axis=1)
-                param_boots[:,b],_ = curve_fit(self._power_law_func, self.lagtimes, self.msd_boots[:,b], p0=initial_guess)
-                self.power_law_boots[:,b] = self._power_law_func(self.lagtimes, param_boots[0,b], param_boots[1,b]) # save fits for error in plot
+                param_boots[:,b],_ = curve_fit(self._power_law_func, self.lagtimes[start_idx:end_idx], self.msd_boots[start_idx:end_idx,b], p0=initial_guess)
+                self.power_law_boots[:,b] = self._power_law_func(self.lagtimes[start_idx:end_idx], param_boots[0,b], param_boots[1,b]) # save fits for error in plot
 
             # calculate mean, standard error, and confidence interval for diffusion coefficient
             if n_bootstraps <= 30: # use t-distribution
@@ -398,9 +406,16 @@ class DiffusionCoefficient:
         return ax
     
 
-    def plot_power_law(self):
+    def plot_power_law(self, start_idx=0, end_idx=None):
         '''
         Plot the power law fit with the MSD data.
+
+        Parameters
+        ----------
+        start_idx : int
+            Starting index for the region to fit the MSD, default=0
+        end_idx : int
+            Ending index for the region to fit the MSD, default=None means end at 50% of the time lags
 
         Returns
         -------
@@ -408,18 +423,22 @@ class DiffusionCoefficient:
 
         '''
 
+        # parse inputs
+        if end_idx is None:
+            end_idx = int(self.lagtimes.shape[0]/2)
+
         # get the fitted power law curve
         fit = self.power_law_boots.mean(axis=1)
         fit_stderr = stats.sem(self.power_law_boots, axis=1)
 
         fig, ax = plt.subplots(1,1)
         
-        ax.plot(self.lagtimes, self.msd_ts, label='MSD')
-        ax.plot(self.lagtimes, fit, ls='dashed', c='black', label='power law fit')
-        ax.fill_between(self.lagtimes, 
-                        self.msd_ts-self.msd_ci[0], 
-                        self.msd_ts+self.msd_ci[1], alpha=0.5)
-        ax.fill_between(self.lagtimes, 
+        ax.plot(self.lagtimes[start_idx:end_idx], self.msd_ts[start_idx:end_idx], label='MSD')
+        ax.plot(self.lagtimes[start_idx:end_idx], fit, ls='dashed', c='black', label='power law fit')
+        ax.fill_between(self.lagtimes[start_idx:end_idx], 
+                        self.msd_ts[start_idx:end_idx]-self.msd_ci[0][start_idx:end_idx], 
+                        self.msd_ts[start_idx:end_idx]+self.msd_ci[1][start_idx:end_idx], alpha=0.5)
+        ax.fill_between(self.lagtimes[start_idx:end_idx], 
                         fit-fit_stderr, 
                         fit+fit_stderr, 
                         alpha=0.5, facecolor='black')

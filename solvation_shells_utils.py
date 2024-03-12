@@ -140,6 +140,20 @@ def run_plumed(plumed_input, traj, dt=0.002, stride=250, output='COLVAR'):
     return COLVAR
 
 
+def unitize(v):
+    '''Create a unit vector from vector v'''
+    return v / np.linalg.norm(v)
+
+
+def get_angle(v1, v2):
+    '''Get the angle between two vectors v1 and v2'''
+    
+    v1 = unitize(v1)
+    v2 = unitize(v2)
+
+    return np.arccos(np.clip(np.dot(v1, v2), -1.0, 1.0))
+
+
 class EquilibriumAnalysis:
 
     def __init__(self, top, traj, water='type OW', cation='resname NA', anion='resname CL'):
@@ -305,6 +319,74 @@ class EquilibriumAnalysis:
             plt.show()
 
 
+    def water_dipole_distribution(self, ion='cation', radius=None, step=1):
+        '''
+        Calculate the distribution of angles between the water dipole and the oxygen-ion vector
+
+        Parameters
+        ----------
+        ion : str
+            Ion to calculate the distribution for. Options are 'cation' and 'anion'. default='cation'
+        radius : float
+            Hydration shell cutoff in Angstroms to select waters within hydration shell only, default=None 
+            means pull from SolvationAnalysis.solute.Solute
+        step : int
+            Step to iterate the trajectory when running the analysis, default=10
+
+        Returns
+        -------
+        angles : np.array
+            Angles for all waters coordinated with all ions, averaged over the number of frames
+
+        '''
+
+        # parse arguments
+        if ion == 'cation':
+            ions = self.cations
+        elif ion == 'anion':
+            ions = self.anions
+        else:
+            raise NameError("Options for kwarg ion are 'cation' or 'anion'")
+        
+        if radius is None:
+            if ion == 'cation':
+                radius = self.solute_ci.radii['water']
+            elif ion == 'anion':
+                radius = self.solute_ai.radii['water']
+
+        # loop through frames and ions to get angle distributions 
+        angles = []
+        for i, ts in enumerate(self.universe.trajectory[::step]):
+            for ci in ions:
+                me = mda.AtomGroup([ci])
+                my_waters = self.waters.select_atoms(f'sphzone {radius} group me', me=me)
+
+                for ow in my_waters:
+
+                    dist = ci.position - ow.position
+
+                    # if the water is on the other side of the box, move it back
+                    for d in range(3):
+                        v = np.array([0,0,0])
+                        v[d] = 1
+                        if dist[d] >= ts.dimensions[d]/2:
+                            ow.residue.atoms.translate(v*ts.dimensions[d])
+                        elif dist[d] <= ts.dimensions[d]/2:
+                            ow.residue.atoms.translate(-v*ts.dimensions[d])
+
+                    # calculate and save angles
+                    pos = ow.position
+                    bonded_Hs = ow.bonded_atoms
+                    tmp_pt = bonded_Hs.positions.mean(axis=0)
+
+                    v1 = ci.position - pos
+                    v2 = pos - tmp_pt
+                    ang = get_angle(v1, v2)*180/np.pi
+                    angles.append(ang)
+        
+        return np.array(angles) / len(self.universe.trajectory[::step])
+
+
     def angular_water_distribution(self, ion='cation', r_range=(2,5), bin_width=0.05, start=0, step=10):
         '''
         Calculate the angular distributions of water around the ions as a function of the radius.
@@ -343,6 +425,7 @@ class EquilibriumAnalysis:
         # initialize the histograms
         th_hist,th_x,th_y = np.histogram2d([], [], bins=[rbins,thbins])
         ph_hist,ph_x,ph_y = np.histogram2d([], [], bins=[rbins,phbins])
+        # ang_hist,ang_ph,ang_th = np.histogram2d([], [], bins=[phbins,thbins])
 
         for i, ts in enumerate(self.universe.trajectory[start::step]):
             for ci in ions:
@@ -357,24 +440,64 @@ class EquilibriumAnalysis:
                 # histogram to get the probability density
                 h1,_,_ = np.histogram2d(r, th, bins=[rbins,thbins], density=True)
                 h2,_,_ = np.histogram2d(r, ph, bins=[rbins,phbins], density=True)
+                # h3,_,_ = np.histogram2d(ph, th, bins=[phbins,thbins], density=True)
                 th_hist += h1
                 ph_hist += h2
+                # ang_hist += h3
                 
 
-        th_hist = th_hist / len(self.universe.trajectory[start::step])
-        ph_hist = ph_hist / len(self.universe.trajectory[start::step])
+        th_hist = th_hist / len(self.universe.trajectory[start::step]) / len(ions)
+        ph_hist = ph_hist / len(self.universe.trajectory[start::step]) / len(ions)
+        # ang_hist = ang_hist / len(self.universe.trajectory[start::step])
 
+        # for the theta distribution, scale by the differential area of a strip around sphere
+        s = np.zeros(th_hist.shape)
+        dth = (th_y[1]-th_y[0])*np.pi/180
+        th_centers = (th_y[:-1] + th_y[1:])/2
+        r_centers = (th_x[:-1] + th_x[1:])/2
+        for i,t in enumerate(th_centers):
+            for j,r in enumerate(r_centers):
+                s[j,i] = 2*np.pi * r**2 * np.sin(t*np.pi/180) * dth
+
+        th_hist = th_hist/s
+
+        # for the phi distribution, scale by the differential area of a strip from pole to pole
+        s = np.zeros(ph_hist.shape)
+        dph = (ph_y[1]-ph_y[0])*np.pi/180
+        ph_centers = (ph_y[:-1] + ph_y[1:])/2
+        r_centers = (ph_x[:-1] + ph_x[1:])/2
+        for i,t in enumerate(ph_centers):
+            for j,r in enumerate(r_centers):
+                s[j,i] = 2*r**2 * dph
+
+        ph_hist = ph_hist/s
+
+        ## TODO
+        # for the angle distribution, scale by the differential area of a square on the surface of the sphere
+        # s = np.zeros(ang_hist.shape)
+        # dth = (ang_th[1]-ang_th[0])*np.pi/180
+        # dph = (ang_ph[1]-ang_ph[0])*np.pi/180
+        # th_centers = (ang_th[:-1] + ang_th[1:])/2
+        # ph_centers = (ang_ph[:-1] + ang_ph[1:])/2
+        # for i,t in enumerate(th_centers):
+        #     for j,r in enumerate(ph_centers):
+        #         s[j,i] = 
+
+        # ang_hist = ang_hist/s
 
         fig1, ax1 = plt.subplots(1,1)
+        # c1 = ax1.pcolor(th_x, th_y, th_hist.T, vmin=0, vmax=0.006)
         c1 = ax1.pcolor(th_x, th_y, th_hist.T)
         ax1.set_xlim(r_range[0],r_range[1])
         ax1.set_ylim(0,180)
+        ax1.set_yticks(np.arange(0,180+30,30))
         ax1.set_ylabel('$\\theta$ (degrees)')
         ax1.set_xlabel('r ($\mathrm{\AA}$)')
         fig1.colorbar(c1,label='probability')
         fig1.savefig(f'{ion}_theta_distribution.png')
 
         fig2, ax2 = plt.subplots(1,1)
+        # c2 = ax2.pcolor(ph_x, ph_y, ph_hist.T, vmin=0, vmax=0.003)
         c2 = ax2.pcolor(ph_x, ph_y, ph_hist.T)
         ax2.set_ylabel('$\phi$ (degrees)')
         ax2.set_xlabel('r ($\mathrm{\AA}$)')
@@ -385,6 +508,8 @@ class EquilibriumAnalysis:
         fig2.savefig(f'{ion}_phi_distribution.png')
         
         plt.show()
+
+        return th_hist, (th_x, th_y), ph_hist, (ph_x, ph_y)
 
 
 
@@ -618,10 +743,13 @@ class UmbrellaAnalysis:
 
         '''
 
+        # initialize some variables
         self.kB = 1.380649 * 10**-23 * 10**-3 * 6.022*10**23 # Boltzmann (kJ / K)
         self.kT = self.kB*T
         self.beta = 1/self.kT
+        self._fes = None
 
+        # read in collective variable files
         self.colvars = []
 
         for i in range(n_umbrellas):
@@ -668,52 +796,20 @@ class UmbrellaAnalysis:
         '''
 
         import pymbar
-        from pymbar import timeseries
 
-        # Step 1: Setting up
-        K = len(self.colvars)                       # number of umbrellas
-        N_max = self.colvars[0].time.shape[0]       # number of data points in each timeseries of coordination number
-        beta_k = np.ones(K) * self.beta             # inverse temperature of simulations (in 1/(kJ/mol)) 
-        K_k = np.ones(K)*KAPPA                      # spring constant (in kJ/mol/nm**2) for different simulations
-        N_k, g_k = np.zeros(K, int), np.zeros(K)    # number of samples and statistical inefficiency of different simulations
-        d_kn = np.zeros([K, N_max])                 # d_kn[k,n] is the coordination number for snapshot n from umbrella simulation k
-        u_kn = np.zeros([K, N_max])                 # u_kn[k,n] is the reduced potential energy without umbrella restraints of snapshot n of umbrella simulation k
-        self.uncorrelated_samples = []              # Uncorrelated samples of different simulations
-
-        # Step 2: Read in and subsample the timeseries
-        for k in range(K):
-            d_kn[k] = self.colvars[k].coordination_number
-            N_k[k] = len(d_kn[k])
-            d_temp = d_kn[k, 0:N_k[k]]
-            g_k[k] = timeseries.statistical_inefficiency(d_temp)     
-            print(f"Statistical inefficiency of simulation {k}: {g_k[k]:.3f}")
-            indices = timeseries.subsample_correlated_data(d_temp, g=g_k[k]) # indices of the uncorrelated samples
-            
-            # Update u_kn and d_kn with uncorrelated samples
-            N_k[k] = len(indices)    # At this point, N_k contains the number of uncorrelated samples for each state k                
-            u_kn[k, 0:N_k[k]] = u_kn[k, indices]
-            d_kn[k, 0:N_k[k]] = d_kn[k, indices]
-            self.uncorrelated_samples.append(d_kn[k, indices])
-
-        N_max = np.max(N_k) # shorten the array size
-        u_kln = np.zeros([K, K, N_max]) # u_kn[k,n] is the reduced potential energy of snapshot n from umbrella simulation k
+        # Step 1: Subsample timeseries
+        u_kn, u_kln, N_k, d_kn = self._subsample_timeseries()
         
-        # Step 3: Bin the data
+        # Step 2: Bin the data
         bin_center_i = np.zeros([nbins])
         bin_edges = np.linspace(d_min, d_max, nbins + 1)
         for i in range(nbins):
             bin_center_i[i] = 0.5 * (bin_edges[i] + bin_edges[i + 1])
 
-        # Step 4: Evaluate reduced energies in all umbrellas
-        for k in range(K):
-            for n in range(N_k[k]):
-                # Compute the distance from the center of simulation k in coordination number space
-                dd = d_kn[k,n] - CN0_k
+        # Step 3: Evaluate reduced energies in all umbrellas
+        u_kln = self._evaluate_reduced_energies(CN0_k, u_kn, u_kln, N_k, d_kn, KAPPA)
 
-                # Compute energy of snapshot n from simulation k in umbrella potential l
-                u_kln[k,:,n] = u_kn[k,n] + beta_k[k] * (K_k / 2) * dd ** 2
-
-        # Step 5: Compute and output the FES
+        # Step 4: Compute and output the FES
         fes = pymbar.FES(u_kln, N_k, verbose=False)
         kde_params = {'bandwidth' : bw}
         d_n = pymbar.utils.kn_to_n(d_kn, N_k=N_k)
@@ -727,7 +823,7 @@ class UmbrellaAnalysis:
         if mintozero:
             results['f_i'] = results['f_i'] - results['f_i'].min()
 
-        # Step 6: Save FES information in the object
+        # Step 5: Save FES information in the object
         self.umbrella_centers = CN0_k
         self._u_kln = u_kln
         self._N_k = N_k
@@ -747,6 +843,44 @@ class UmbrellaAnalysis:
         return self.bin_centers, self.fes
     
 
+    def average_coordination_number(self, CN0_k=None, KAPPA=100):
+        '''
+        Compute the average coordination number with a Boltzmann-weighted average
+        
+        Parameters
+        ----------
+        CN0_k : array-like
+            Coordination numbers at the umbrella simulation centers, default=None because it is not
+            necessary if there is already an underlying MBAR object
+        KAPPA : float
+            Strength of the harmonic potential (kJ/mol/nm^2), default=100
+
+        Returns
+        -------
+        results['mu'] : float
+            Boltzmann-weighted average coordination number
+        results['sigma'] : float
+            Standard deviation of the mean coordination number
+
+        '''
+
+        import pymbar
+
+        # first, subsample the timeseries to get d_kn (the uncorrelated coordination numbers)
+        u_kn, u_kln, N_k, d_kn = self._subsample_timeseries()
+
+        if self._fes is None: # if no underlying MBAR object, create one
+            u_kln = self._evaluate_reduced_energies(CN0_k, u_kn, u_kln, N_k, d_kn, KAPPA)
+            mbar = pymbar.MBAR(u_kln, N_k)
+
+        else: # otherwise get it from FES
+            mbar = self._fes.get_mbar()
+
+        results = mbar.compute_expectations(d_kn)
+
+        return results['mu'], results['sigma']
+
+        
     def find_minima(self, plot=False, method='find_peaks', **kwargs):
         '''
         Find the local minima of the free energy surface. `method` options are 'find_peaks'
@@ -791,6 +925,98 @@ class UmbrellaAnalysis:
         return self.minima_locs
     
 
+    def _subsample_timeseries(self):
+        '''
+        Subsample the timeseries to get uncorrelated samples. This function also sets up the variables 
+        needed for pymbar.MBAR object and pymbar.FES object.
+        
+        Returns
+        -------
+        u_kn : array-like
+            u_kn[k,n] is the reduced potential energy without umbrella restraints of snapshot n of umbrella simulation k, 
+            reshaped for uncorrelated samples
+        u_kln : array-like
+            u_kln[k,n] is the reduced potential energy of snapshot n from umbrella simulation k, shaped properly
+        N_k : array-like
+            Number of samples frum umbrella k, reshaped for uncorrelated samples
+        d_kn : array-like
+            d_kn[k,n] is the coordination number for snapshot n from umbrella simulation k, reshaped for uncorrelated samples
+
+        '''
+
+        from pymbar import timeseries
+        
+        # Step 1a: Setting up
+        K = len(self.colvars)                       # number of umbrellas
+        N_max = self.colvars[0].time.shape[0]       # number of data points in each timeseries of coordination number
+        N_k, g_k = np.zeros(K, int), np.zeros(K)    # number of samples and statistical inefficiency of different simulations
+        d_kn = np.zeros([K, N_max])                 # d_kn[k,n] is the coordination number for snapshot n from umbrella simulation k
+        u_kn = np.zeros([K, N_max])                 # u_kn[k,n] is the reduced potential energy without umbrella restraints of snapshot n of umbrella simulation k
+        self.uncorrelated_samples = []              # Uncorrelated samples of different simulations
+
+        # Step 1b: Read in and subsample the timeseries
+        for k in range(K):
+            d_kn[k] = self.colvars[k].coordination_number
+            N_k[k] = len(d_kn[k])
+            d_temp = d_kn[k, 0:N_k[k]]
+            g_k[k] = timeseries.statistical_inefficiency(d_temp)     
+            print(f"Statistical inefficiency of simulation {k}: {g_k[k]:.3f}")
+            indices = timeseries.subsample_correlated_data(d_temp, g=g_k[k]) # indices of the uncorrelated samples
+            
+            # Update u_kn and d_kn with uncorrelated samples
+            N_k[k] = len(indices)    # At this point, N_k contains the number of uncorrelated samples for each state k                
+            u_kn[k, 0:N_k[k]] = u_kn[k, indices]
+            d_kn[k, 0:N_k[k]] = d_kn[k, indices]
+            self.uncorrelated_samples.append(d_kn[k, indices])
+
+        N_max = np.max(N_k) # shorten the array size
+        u_kln = np.zeros([K, K, N_max]) # u_kln[k,n] is the reduced potential energy of snapshot n from umbrella simulation k
+
+        return u_kn, u_kln, N_k, d_kn
+    
+
+    def _evaluate_reduced_energies(self, CN0_k, u_kn, u_kln, N_k, d_kn, KAPPA=100):
+        '''
+        Create the u_kln matrix of reduced energies from the umbrella simulations.
+
+        Parameters
+        ----------
+        CN0_k : array-like
+            Coordination numbers at the umbrella simulation centers
+        u_kn : array-like
+            u_kn[k,n] is the reduced potential energy without umbrella restraints of snapshot n of umbrella simulation k
+        u_kln : array-like
+            u_kln[k,n] is the reduced potential energy of snapshot n from umbrella simulation k
+        N_k : array-like
+            Number of samples frum umbrella k
+        d_kn : array-like
+            d_kn[k,n] is the coordination number for snapshot n from umbrella simulation k
+        KAPPA : float
+            Strength of the harmonic potential (kJ/mol/nm^2), default=100
+
+        Returns
+        -------
+        u_kln : array-like
+            u_kln[k,n] is the reduced potential energy of snapshot n from umbrella simulation k, calculated from
+            u_kn and the harmonic restraint, shaped properly
+
+        '''
+
+        K = len(self.colvars)                       # number of umbrellas
+        beta_k = np.ones(K) * self.beta             # inverse temperature of simulations (in 1/(kJ/mol)) 
+        K_k = np.ones(K)*KAPPA                      # spring constant (in kJ/mol/nm**2) for different simulations
+
+        for k in range(K):
+            for n in range(N_k[k]):
+                # Compute the distance from the center of simulation k in coordination number space
+                dd = d_kn[k,n] - CN0_k
+
+                # Compute energy of snapshot n from simulation k in umbrella potential l
+                u_kln[k,:,n] = u_kn[k,n] + beta_k[k] * (K_k / 2) * dd ** 2
+
+        return u_kln
+
+
     def _fit_spline(self):
         '''
         Fit a scipy.interpolate.UnivariateSpline to the FES. Uses a quartic spline (k=4) 
@@ -827,3 +1053,56 @@ class UmbrellaAnalysis:
         minima_vals = self.spline(minima_locs)
 
         return minima_locs, minima_vals
+
+
+
+# TEMPORARY
+# define some functions for analysis
+def unitize(v):
+    '''Create a unit vector from vector v'''
+    return v / np.linalg.norm(v)
+
+
+def get_angle(v1, v2):
+    '''Get the angle between two vectors v1 and v2'''
+    
+    v1 = unitize(v1)
+    v2 = unitize(v2)
+
+    return np.arccos(np.clip(np.dot(v1, v2), -1.0, 1.0))
+
+
+def get_distributions(solute_Na, ion, shell_OW, shell):
+    '''
+    Get the water angle and water orientation distributions for a given shell
+    
+    shell : dict, the shell structure to look at, e.g. {water : 5, ion : 0}
+    '''
+
+    df1 = solute_Na.speciation.get_shells(shell)
+    frames = np.array(df1.droplevel(1).index.to_list())
+
+    angles = []
+    orientations = []
+    for i, ts in enumerate(u.trajectory[frames]):
+
+        # calculate angles between ref-ion-OW
+        tmp_point = ion.positions[0] + np.array([0,0,1])
+        v1 = tmp_point - ion.positions[0]
+        for pos in shell_OW.positions:
+            v2 = pos - ion.positions[0]
+            ang = get_angle(v1, v2)*180/np.pi
+            angles.append(ang)
+
+        # calculate angles between avg_HW-OW-ion
+        for O in shell_OW:
+            pos = O.position
+            bonded_Hs = O.bonded_atoms
+            tmp_point = bonded_Hs.positions.mean(axis=0)
+            
+            v1 = ion.positions[0] - pos
+            v2 = pos - tmp_point
+            ang = get_angle(v1, v2)*180/np.pi
+            orientations.append(ang)
+
+    return np.array(angles), np.array(orientations)

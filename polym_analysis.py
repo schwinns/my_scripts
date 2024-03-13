@@ -839,22 +839,36 @@ class PolymAnalysis():
         self.__init__(output)
 
 
-    def insert_cations_in_membrane(self, ion_name='NA', ion_charge=1, output='PA_ions.gro'):
+    def insert_cations_in_membrane(self, ion_name='NA', ion_charge=1, deprotonated=True, output='PA_ions.gro'):
         '''Add ions to the membrane by merging universe with ion universe'''
 
-        # locate waters near carboxylate O's and save coordinates
-        c_group = self.universe.select_atoms('type c and not bonded type n')
-        o_list = []
-        for c in c_group:
-            deprot_o = [atom for atom in c.bonded_atoms if atom.type == 'o']
-            if len(deprot_o) == 2:
-                o_list.append(deprot_o[0]) # add one of the two O's to the AtomGroup
+        # TODO: adjust to insert cations into a fully protonated membrane
 
-        # if no deprotonated O's are found, rewrite the original system and exit
-        if len(o_list) == 0:
-            n_ions = 0
-            self.atoms.write(output)
-            return n_ions, output
+        if deprotonated:
+                
+            # locate waters near carboxylate O's and save coordinates
+            c_group = self.universe.select_atoms('type c and not bonded type n')
+            o_list = []
+            for c in c_group:
+                deprot_o = [atom for atom in c.bonded_atoms if atom.type == 'o']
+                if len(deprot_o) == 2:
+                    o_list.append(deprot_o[0]) # add one of the two O's to the AtomGroup
+
+            # if no deprotonated O's are found, rewrite the original system and exit
+            if len(o_list) == 0:
+                n_ions = 0
+                self.atoms.write(output)
+                return n_ions, output
+            
+        if not deprotonated:
+
+            excess_charge = 0
+            # locate waters near carboxylate O's and save coordinates
+            c_group = self.universe.select_atoms('type c and not bonded type n')
+            o_list = []
+            for c in c_group:
+                carboxyl_o = [atom for atom in c.bonded_atoms if atom.type == 'o']
+                o_list.append(carboxyl_o[0]) # add the =O from COOH to the o_list 
 
         o_group = mda.AtomGroup(o_list)
         
@@ -870,13 +884,15 @@ class PolymAnalysis():
 
         n_deprot_O = n_ions
         
-        # calculate the excess charge and fix the number of ions for multivalent cations
-        polymer_charge = n_ions*-1
-        if n_ions % ion_charge > 0:
-            n_ions = int(n_ions/ion_charge)+1
+        if deprotonated:
+            # calculate the excess charge and fix the number of ions for multivalent cations
+            polymer_charge = n_ions*-1
+            if n_ions % ion_charge > 0:
+                n_ions = int(n_ions/ion_charge)+1
 
-        counterion_charge = n_ions*ion_charge
-        excess_charge = counterion_charge + polymer_charge # should give a positive number since we are adding an extra cation beyond number of O- / ion charge
+            counterion_charge = n_ions*ion_charge
+            excess_charge = counterion_charge + polymer_charge # should give a positive number since we are adding an extra cation beyond number of O- / ion charge
+
         print(f'{n_deprot_O} out of {len(o_group)} carboxylate groups have waters to be replaced by ions. Inserting {n_ions} ions...')
 
         # reassign residue numbers after deleted waters

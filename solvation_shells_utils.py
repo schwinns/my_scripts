@@ -358,8 +358,8 @@ class EquilibriumAnalysis:
         angles = []
         for i, ts in enumerate(self.universe.trajectory[::step]):
             for ci in ions:
-                me = mda.AtomGroup([ci])
-                my_waters = self.waters.select_atoms(f'sphzone {radius} group me', me=me)
+                my_atoms = self.universe.select_atoms(f'sphzone {radius} index {ci.index}') - ci
+                my_waters = my_atoms & self.waters # intersection operator to get the OW from my_atoms
 
                 for ow in my_waters:
 
@@ -371,7 +371,7 @@ class EquilibriumAnalysis:
                         v[d] = 1
                         if dist[d] >= ts.dimensions[d]/2:
                             ow.residue.atoms.translate(v*ts.dimensions[d])
-                        elif dist[d] <= ts.dimensions[d]/2:
+                        elif dist[d] <= -ts.dimensions[d]/2:
                             ow.residue.atoms.translate(-v*ts.dimensions[d])
 
                     # calculate and save angles
@@ -384,7 +384,7 @@ class EquilibriumAnalysis:
                     ang = get_angle(v1, v2)*180/np.pi
                     angles.append(ang)
         
-        return np.array(angles) / len(self.universe.trajectory[::step])
+        return np.array(angles)
 
 
     def angular_water_distribution(self, ion='cation', r_range=(2,5), bin_width=0.05, start=0, step=10):

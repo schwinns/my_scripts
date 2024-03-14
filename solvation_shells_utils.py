@@ -510,7 +510,71 @@ class EquilibriumAnalysis:
         plt.show()
 
         return th_hist, (th_x, th_y), ph_hist, (ph_x, ph_y)
+    
 
+    def spatial_density(self, group='type OW', ion='cation', r_max=5, step=1):
+        '''
+        Plot a 3D spatial density for the locations of `group` around the ion. Creates an interactive
+        plot using `plotly`.
+        
+        Parameters
+        ----------
+        group : str
+            MDAnalysis atom selection language describing the group whose density will be plotted, default=`type OW`
+            are the water oxygens
+        ion : str
+            Ion to calculate the distributions for. Options are 'cation' and 'anion'. default='cation'
+        r_max : float
+            Radial distance (Angstroms) to go out around the ion, default=5
+        step : int
+            Step to iterate the trajectory when running the analysis, default=1
+
+        Returns
+        -------
+        hist : np.array
+            Occupation density around the ion. This is the counts over the whole trajectory divided by the maximum
+            value to scale between 0 and 1.
+        edges : tuple
+            The (X,Y,Z) meshgrid necessary for plotting `hist` in 3D space.
+        
+        '''
+
+        import plotly.graph_objects as go
+
+        # initialize grid space, bins, and histogram
+        X, Y, Z = np.mgrid[-r_max:r_max:20j, -r_max:r_max:20j, -r_max:r_max:20j]
+        bins = np.linspace(-r_max, r_max, 20+1)
+        init_sample = np.array([[0,0,0],
+                                [0,0,0]])
+        hist, edges = np.histogramdd(init_sample, bins=(bins,bins,bins))
+        hist[hist > 0] = 0 # set the initialized histogram to 0
+
+        for i,ts in enumerate(self.universe.trajectory[::step]):
+            for ci in self.cations:
+                self.universe.atoms.translate(-ci.position)
+                my_atoms = self.universe.select_atoms(f'sphzone {r_max} index {ci.index}') - ci
+                my_selection = my_atoms.select_atoms(group)
+
+                h,_ = np.histogramdd(my_selection.positions, bins=(bins,bins,bins))
+                hist += h
+
+        hist = hist / hist.max()
+
+        fig = go.Figure(data=go.Volume(
+        x=X.flatten(),
+        y=Y.flatten(),
+        z=Z.flatten(),
+        value=hist.flatten(),
+        isomin=0.25,
+        isomax=1,
+        opacity=0.05, # needs to be small to see through all surfaces
+        surface_count=20, # needs to be a large number for good volume rendering
+        colorscale='jet'
+        ))
+
+        fig.show()
+
+        return hist, (X,Y,Z)
 
 
 class MetaDAnalysis:

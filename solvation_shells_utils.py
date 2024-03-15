@@ -512,7 +512,7 @@ class EquilibriumAnalysis:
         return th_hist, (th_x, th_y), ph_hist, (ph_x, ph_y)
     
 
-    def spatial_density(self, group='type OW', ion='cation', r_max=5, step=1):
+    def spatial_density(self, group='type OW', ion='cation', r_max=5, grid_pts=20, step=1):
         '''
         Plot a 3D spatial density for the locations of `group` around the ion. Creates an interactive
         plot using `plotly`.
@@ -526,6 +526,8 @@ class EquilibriumAnalysis:
             Ion to calculate the distributions for. Options are 'cation' and 'anion'. default='cation'
         r_max : float
             Radial distance (Angstroms) to go out around the ion, default=5
+        grid_pts : int
+            Number of grid points for the 3D meshgrid, default=20
         step : int
             Step to iterate the trajectory when running the analysis, default=1
 
@@ -542,8 +544,8 @@ class EquilibriumAnalysis:
         import plotly.graph_objects as go
 
         # initialize grid space, bins, and histogram
-        X, Y, Z = np.mgrid[-r_max:r_max:20j, -r_max:r_max:20j, -r_max:r_max:20j]
-        bins = np.linspace(-r_max, r_max, 20+1)
+        X, Y, Z = np.meshgrid(np.linspace(-r_max,r_max,grid_pts), np.linspace(-r_max,r_max,grid_pts), np.linspace(-r_max,r_max,grid_pts))
+        bins = np.linspace(-r_max, r_max, grid_pts+1)
         init_sample = np.array([[0,0,0],
                                 [0,0,0]])
         hist, edges = np.histogramdd(init_sample, bins=(bins,bins,bins))
@@ -558,15 +560,15 @@ class EquilibriumAnalysis:
                 h,_ = np.histogramdd(my_selection.positions, bins=(bins,bins,bins))
                 hist += h
 
-        hist = hist / hist.max()
+        # hist = hist / hist.max()
 
         fig = go.Figure(data=go.Volume(
         x=X.flatten(),
         y=Y.flatten(),
         z=Z.flatten(),
         value=hist.flatten(),
-        isomin=0.25,
-        isomax=1,
+        isomin=0,
+        isomax=hist.max(),
         opacity=0.05, # needs to be small to see through all surfaces
         surface_count=20, # needs to be a large number for good volume rendering
         colorscale='jet'

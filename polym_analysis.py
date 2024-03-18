@@ -839,61 +839,47 @@ class PolymAnalysis():
         self.__init__(output)
 
 
-    def insert_cations_in_membrane(self, ion_name='NA', ion_charge=1, deprotonated=True, output='PA_ions.gro'):
+    def insert_cations_in_membrane(self, ion_name='NA', ion_charge=1, extra_inserted=0, output='PA_ions.gro'):
         '''Add ions to the membrane by merging universe with ion universe'''
 
-        # TODO: adjust to insert cations into a fully protonated membrane
-
-        if deprotonated:
-                
-            # locate waters near carboxylate O's and save coordinates
-            c_group = self.universe.select_atoms('type c and not bonded type n')
-            o_list = []
-            for c in c_group:
-                deprot_o = [atom for atom in c.bonded_atoms if atom.type == 'o']
-                if len(deprot_o) == 2:
-                    o_list.append(deprot_o[0]) # add one of the two O's to the AtomGroup
-
-            # if no deprotonated O's are found, rewrite the original system and exit
-            if len(o_list) == 0:
-                n_ions = 0
-                self.atoms.write(output)
-                return n_ions, output
-            
-        if not deprotonated:
-
-            excess_charge = 0
-            # locate waters near carboxylate O's and save coordinates
-            c_group = self.universe.select_atoms('type c and not bonded type n')
-            o_list = []
-            for c in c_group:
-                carboxyl_o = [atom for atom in c.bonded_atoms if atom.type == 'o']
-                o_list.append(carboxyl_o[0]) # add the =O from COOH to the o_list 
-
-        o_group = mda.AtomGroup(o_list)
+        # locate COOH/COO- oxygens
+        c_group = self.universe.select_atoms('type c and not bonded type n')
+        deprot_o = []
+        prot_o = []
+        for c in c_group:
+            my_Os = [atom for atom in c.bonded_atoms if atom.type == 'o']
+            if len(my_Os) == 2:
+                deprot_o.append(my_Os[0]) # add one of the two O's to the AtomGroup
+            elif len(my_Os) == 1:
+                prot_o.append(my_Os[0]) # add the =O to the AtomGroup
+            else:
+                raise TypeError(f'{c} is not the carbon in R-COOH or R-COO-')
         
-        n_ions = 0
+        # calculate excess charge from adding ions
+        polymer_charge = len(deprot_o)*-1
+        if len(deprot_o) % ion_charge > 0: # if we cannot exactly balance polymer charge with cations
+            n_ions = round(len(deprot_o) / ion_charge) + 1
+        else:
+            n_ions = len(deprot_o)
+
+        n_ions += extra_inserted # add the extra inserted ions to total added ions count
+        counterion_charge = n_ions*ion_charge # calculate charge from added ions
+        excess_charge = counterion_charge + polymer_charge # calculate excess charge from polymer and added ions
+
+        # select which O's to place ions near
+        rng = np.random.default_rng()
+        prot_idx = rng.integers(0, len(prot_o), size=extra_inserted) # get random indices of COOH oxygens
+        tmp = np.array(prot_o)
+        o_group = mda.AtomGroup(deprot_o + tmp[prot_idx].tolist()) # select all deprotonated groups and extra_inserted random protonated groups
+
+        # delete waters and find where to place ions
         ion_pos = []
         for O in o_group:
             my_id = O.index
-            my_waters = self.universe.select_atoms(f'resname SOL and sphzone 5 index {my_id}').residues
+            my_waters = self.universe.select_atoms(f'resname SOL and sphzone 5 index {my_id}').residues # select waters within 5 Angstroms
             if len(my_waters) > 0:
-                ion_pos.append(my_waters.atoms.center_of_mass())
+                ion_pos.append(my_waters.atoms.center_of_mass()) # place ion at COM of the waters
                 self.atoms = self.atoms.subtract(my_waters.atoms) # remove the waters to be replaced
-                n_ions += 1
-
-        n_deprot_O = n_ions
-        
-        if deprotonated:
-            # calculate the excess charge and fix the number of ions for multivalent cations
-            polymer_charge = n_ions*-1
-            if n_ions % ion_charge > 0:
-                n_ions = int(n_ions/ion_charge)+1
-
-            counterion_charge = n_ions*ion_charge
-            excess_charge = counterion_charge + polymer_charge # should give a positive number since we are adding an extra cation beyond number of O- / ion charge
-
-        print(f'{n_deprot_O} out of {len(o_group)} carboxylate groups have waters to be replaced by ions. Inserting {n_ions} ions...')
 
         # reassign residue numbers after deleted waters
         dims = self.universe.dimensions # save original dimensions

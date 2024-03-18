@@ -814,8 +814,9 @@ class UmbrellaAnalysis:
         kde_params = {'bandwidth' : bw}
         d_n = pymbar.utils.kn_to_n(d_kn, N_k=N_k)
         if n_bootstraps == 0:
-            fes.generate_fes(u_kn, d_n, fes_type='kde', kde_parameters=kde_params)
-            results = fes.get_fes(bin_center_i, reference_point='from-lowest')
+            # fes.generate_fes(u_kn, d_n, fes_type='kde', kde_parameters=kde_params)
+            fes.generate_fes(u_kn, d_n, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges})
+            results = fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method='analytical')
         else:
             fes.generate_fes(u_kn, d_n, fes_type='kde', kde_parameters=kde_params, n_bootstraps=n_bootstraps)
             results = fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method='bootstrap')
@@ -831,8 +832,8 @@ class UmbrellaAnalysis:
         self._results = results             # underlying results object
         self.bin_centers = bin_center_i
         self.fes = results['f_i']*self.kT
-        if n_bootstraps > 0:
-            self.error = results['df_i']*self.kT
+        # if n_bootstraps > 0:
+        self.error = results['df_i']*self.kT
 
         if filename is not None:
             if n_bootstraps == 0:
@@ -924,6 +925,50 @@ class UmbrellaAnalysis:
 
         return self.minima_locs
     
+    
+    def get_dehydration_energy(self, cn1, cn2, uncertainty_method=None):
+        '''
+        Calculate the dehydration energy from cn1 to cn2. This function fits a spline to the free energy surface
+        and estimates the energies as the spline evaluated at cn1 and cn2. For positive free energy, corresponding to
+        how much free energy is needed to strip a coordinated water, cn1 should be the higher energy coordination state.
+
+        Parameters
+        ----------
+        cn1 : float
+            Coordination number of state 1 to calculate dG = G_1 - G_2
+        cn2 : float
+            Coordination number of state 2 to calculate dG = G_1 - G_2
+        uncertainty_method : str
+            Method to calculate the uncertainty. Currently, the only method available is 'bootstrap'. Default=None means
+            it will not calculate uncertainty.
+
+        Returns
+        -------
+        dG : float
+            Free energy difference between cn1 and cn2
+        dG_std : float
+            Standard deviation in the free energy difference, only returned if uncertainty_method='bootstrap'
+        
+        '''
+
+        if uncertainty_method == 'bootstrap':
+            n_bootstraps = len(self._fes.kdes)
+            x = self.bin_centers.reshape(-1,1)
+
+            dG_boots = np.zeros(n_bootstraps)
+            for b in range(n_bootstraps):
+                fes_boot = -self._fes.kdes[b].score_samples(x)*self.kT
+                spline = self._fit_spline(self.bin_centers, fes_boot)
+                dG_boots[b] = spline(cn1) - spline(cn2)
+
+            return dG_boots.mean(), dG_boots.std()
+        
+        else:
+            spline = self._fit_spline(self.bin_centers, self.fes)
+            dG = spline(cn1) - spline(cn2)
+
+            return dG
+
 
     def _subsample_timeseries(self):
         '''
@@ -1017,10 +1062,17 @@ class UmbrellaAnalysis:
         return u_kln
 
 
-    def _fit_spline(self):
+    def _fit_spline(self, bins=None, fes=None):
         '''
         Fit a scipy.interpolate.UnivariateSpline to the FES. Uses a quartic spline (k=4) 
         and interpolates with all points, no smoothing (s=0)
+
+        Parameters
+        ----------
+        bins : np.array
+            Bins of the FES to fit to spline, default=None means use self.bin_centers
+        fes : np.array
+            FES to fit to spline, default=None means use self.fes
 
         Returns
         -------
@@ -1030,7 +1082,12 @@ class UmbrellaAnalysis:
 
         from scipy.interpolate import UnivariateSpline
 
-        f = UnivariateSpline(self.bin_centers, self.fes, k=4, s=0)
+        if bins is None:
+            bins = self.bin_centers
+        if fes is None:
+            fes = self.fes
+
+        f = UnivariateSpline(bins, fes, k=4, s=0)
         
         return f
     

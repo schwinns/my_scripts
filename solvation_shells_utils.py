@@ -60,6 +60,104 @@ def mdrun(tpr, output=None, gmx='gmx', flags={}, dry_run=False):
     return output + '.gro'
 
 
+def write_packmol(C, cation, anion, cation_charge=1, anion_charge=-1, n_waters=1000, water='water.pdb', filename='solution.inp', packmol_options=None):
+    '''
+    Write packmol input file for standard MD simulation
+    
+    Parameters
+    ----------
+    C : float
+        Concentration of the solution
+    cation : str
+        Filename of the cation in solution
+    anion : str
+        Filename of the anion in solution
+    cation_charge : int
+        Charge on the cation, default=+1
+    anion_charge : int
+        Charge on the anion, default=-1
+    n_waters : int
+        Number of water molecules to pack in system, default=1000
+    water : str
+        Filename of the water molecule in solution, default='water.pdb'
+    filename : str
+        Filename for the packmol input file
+    packmol_options : dict
+        Additional options to put in the packmol input file, default=None uses some presets.
+        If specified, should have 'seed', 'tolerance', 'filetype', 'output', 'box'.
+
+    Returns
+    -------
+    filename : str
+        Filename of the packmol input file
+
+    '''
+
+    if packmol_options is None:
+        packmol_options = {
+            'seed' : 123456,
+            'tolerance' : 2.0,
+            'filetype' : 'pdb',
+            'output' : filename.split('.inp')[0],
+            'box' : 32
+        }
+
+    # (n_cations / salt molecule) * (N_A salt molecules / mol salt) * (C mol salt / L water) * (L water / rho g water) * (18.02 g / mol) * (mol / N_A molecules) * (n_water molecules)
+    n_cations = (-cation_charge/anion_charge) * C / 997 * 18.02 * n_waters
+    n_anions = (-anion_charge/cation_charge) * C / 997 * 18.02 * n_waters
+
+    print(f'For a box of {n_waters} waters, would need {n_cations} cations and {n_anions} anions.')
+
+    n_cations = round(n_cations)
+    n_anions = round(n_anions)
+    print(f'So, adding {n_cations} cations and {n_anions} anions...')
+
+    f = dedent(f'''\
+    #
+    # A mixture of water and salt
+    #
+
+    # All the atoms from diferent molecules will be separated at least {packmol_options['tolerance']}
+    # Anstroms at the solution.
+
+    seed {packmol_options['seed']}
+    tolerance {packmol_options['tolerance']}
+    filetype {packmol_options['filetype']}
+
+    # The name of the output file
+
+    output {packmol_options['output']}
+
+    # {n_waters} water molecules and {n_cations} cations, {n_anions} anions will be put in a box
+    # defined by the minimum coordinates x, y and z = 0. 0. 0. and maximum
+    # coordinates {packmol_options['box']}. {packmol_options['box']}. {packmol_options['box']}. That is, they will be put in a cube of side
+    # {packmol_options['box']} Angstroms. (the keyword "inside cube 0. 0. 0. {packmol_options['box']}.") could be used as well.
+
+    structure {water}
+    number {n_waters}
+    inside box 0. 0. 0. {packmol_options['box']}. {packmol_options['box']}. {packmol_options['box']}. 
+    end structure
+
+    structure {cation}
+    number {n_cations}
+    inside box 0. 0. 0. {packmol_options['box']}. {packmol_options['box']}. {packmol_options['box']}.
+    end structure
+
+    structure {anion}
+    number {n_anions}
+    inside box 0. 0. 0. {packmol_options['box']}. {packmol_options['box']}. {packmol_options['box']}.
+    end structure
+
+
+    ''')
+
+    out = open(filename, 'w')
+    out.write(f)
+    out.close()
+
+    return filename
+
+
 def write_plumed_metad(options, filename='plumed.dat'):
     '''Write plumed.dat file for metadynamics simulation'''
 
@@ -274,6 +372,19 @@ class EquilibriumAnalysis:
         self.rdfs['ci-ai'] = ci_ai.results
 
         return self.rdfs
+    
+
+    def get_coordination_numbers(self):
+        '''
+        Calculate the coordination number as a function of time for the trajectory.
+        
+        Parameters
+        ----------
+        
+        Returns
+        -------
+        
+        '''
     
 
     def shell_probabilities(self, plot=False):
@@ -880,7 +991,6 @@ class UmbrellaAnalysis:
         kde_params = {'bandwidth' : bw}
         d_n = pymbar.utils.kn_to_n(d_kn, N_k=N_k)
         if n_bootstraps == 0:
-            # fes.generate_fes(u_kn, d_n, fes_type='kde', kde_parameters=kde_params)
             fes.generate_fes(u_kn, d_n, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges})
             results = fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method='analytical')
         else:
@@ -898,14 +1008,10 @@ class UmbrellaAnalysis:
         self._results = results             # underlying results object
         self.bin_centers = bin_center_i
         self.fes = results['f_i']*self.kT
-        # if n_bootstraps > 0:
         self.error = results['df_i']*self.kT
 
         if filename is not None:
-            if n_bootstraps == 0:
-                np.savetxt(filename, np.vstack([self.bin_centers, self.fes]).T, header='coordination number, free energy (kJ/mol)')
-            else:
-                np.savetxt(filename, np.vstack([self.bin_centers, self.fes, self.error]).T, header='coordination number, free energy (kJ/mol), error (kJ/mol)')
+            np.savetxt(filename, np.vstack([self.bin_centers, self.fes, self.error]).T, header='coordination number, free energy (kJ/mol), error (kJ/mol)')
 
         return self.bin_centers, self.fes
     

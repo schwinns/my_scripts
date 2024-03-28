@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 import MDAnalysis as mda
+from MDAnalysis.analysis import distances
 
 import subprocess
 from textwrap import dedent
@@ -197,6 +198,27 @@ def write_plumed_umbrella(options, filename='plumed.dat'):
     return filename
 
 
+def write_plumed_decoordination(options, filename='plumed.dat'):
+    '''Write plumed input file for umbrella sampling simulation biased in total coordination'''
+
+    f = dedent(f'''\
+    ion: GROUP NDX_FILE={options['ndx']} NDX_GROUP={options['ion_group']}
+    not_ion: GROUP NDX_FILE={options['ndx']} NDX_GROUP={options['not_ion_group']}
+    n: COORDINATION GROUPA=ion GROUPB=not_ion SWITCH={{Q REF={options['R_0']} BETA=-{options['a']} LAMBDA=1 R_0={options['R_0']}}}
+    t: MATHEVAL ARG=n FUNC={options['n_group']}-x PERIODIC=NO
+
+    r: RESTRAINT ARG=t KAPPA={options['KAPPA']} AT={options['AT']} # apply a harmonic restraint at CN=AT with force constant = KAPPA kJ/mol
+
+    PRINT STRIDE={options['STRIDE']} ARG=* FILE={options['FILE']}
+    ''')
+
+    out = open(filename, 'w')
+    out.write(f)
+    out.close()
+
+    return filename
+
+
 def write_sbatch_umbrella(options, filename='submit.job'):
     '''Write SLURM submission script to run an individual umbrella simulation'''
 
@@ -330,7 +352,7 @@ class EquilibriumAnalysis:
         print(f"Hydration shell cutoff for anion-water = {self.solute_ai.radii['water']:.6f}")
     
 
-    def generate_rdfs(self, bin_width=0.05, range=(0,20), **kwargs):
+    def generate_rdfs(self, bin_width=0.05, range=(0,20), step=1):
         '''
         Calculate radial distributions for the solution. This method calculates the RDFs for cation-water,
         anion-water, water-water, and cation-anion using MDAnalysis InterRDF. It saves the data in a 
@@ -342,6 +364,8 @@ class EquilibriumAnalysis:
             Width of the bins for the RDFs, default=0.05
         range : array-like
             Range over which to calculate the RDF
+        step : int
+            Trajectory step for which to calculate the RDF
 
         Returns
         -------
@@ -352,40 +376,65 @@ class EquilibriumAnalysis:
 
         from MDAnalysis.analysis import rdf
 
-        nbins = int(range[1] - range[0]) / bin_width
+        nbins = int((range[1] - range[0]) / bin_width)
         self.rdfs = {}
 
-        ci_w = rdf.InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf', **kwargs)
-        ci_w.run(**kwargs)
+        ci_w = rdf.InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf')
+        ci_w.run(step=step)
         self.rdfs['ci-w'] = ci_w.results
 
-        ai_w = rdf.InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf', **kwargs)
-        ai_w.run(**kwargs)
+        ai_w = rdf.InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf')
+        ai_w.run(step=step)
         self.rdfs['ai-w'] = ai_w.results
 
-        w_w = rdf.InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf', **kwargs)
-        w_w.run(**kwargs)
+        w_w = rdf.InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf')
+        w_w.run(step=step)
         self.rdfs['w-w'] = w_w.results
 
-        ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf', **kwargs)
-        ci_ai.run(**kwargs)
+        ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf')
+        ci_ai.run(step=step)
         self.rdfs['ci-ai'] = ci_ai.results
 
         return self.rdfs
     
 
-    def get_coordination_numbers(self):
+    def get_coordination_numbers(self, step=1):
         '''
-        Calculate the coordination number as a function of time for the trajectory.
+        Calculate the water coordination number as a function of time for both cations and anions.
         
         Parameters
         ----------
+        step : int
+            Trajectory step for which to calculate coordination numbers
         
         Returns
         -------
+        avg_CN : np.array
+            Average coordination number over the trajectory for [cations, anions]
         
         '''
     
+        try:
+            self.solute_ci
+        except NameError:
+            print('Solutes not initialized. Try `initialize_Solutes()` first')
+
+        # initialize coordination number as a function of time
+        self.coordination_numbers = np.zeros((2,len(self.universe.trajectory[::step])))
+
+        for i,ts in enumerate(self.universe.trajectory[::step]):
+            # first for cations
+            d = distances.distance_array(self.cations, self.waters, box=ts.dimensions)
+            n_coordinating = (d <= self.solute_ci.radii['water']).sum()
+            self.coordination_numbers[0,i] = n_coordinating / len(self.cations)
+
+            # then for anions
+            d = distances.distance_array(self.anions, self.waters, box=ts.dimensions)
+            n_coordinating = (d <= self.solute_ai.radii['water']).sum()
+            self.coordination_numbers[1,i] = n_coordinating / len(self.anions)
+
+        return self.coordination_numbers.mean(axis=1)
+        
 
     def shell_probabilities(self, plot=False):
         '''

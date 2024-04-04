@@ -13,7 +13,7 @@ def run(commands):
         subprocess.run(cmd, shell=True)
 
 
-def update_topology(n_waters, n_cations, n_anions, filename='solution.top'):
+def update_topology(n_waters, n_cations, n_anions, cation='NA', anion='CL', filename='solution.top'):
     '''Update the top file with new numbers of waters and ions'''
 
     f = dedent(f'''\
@@ -42,13 +42,13 @@ def update_topology(n_waters, n_cations, n_anions, filename='solution.top'):
     #include "ions.itp"
 
     [ system ]
-    water and NaCl
+    water and NaBr
 
     [ molecules ]
     ; Compound        nmols
     SOL              {n_waters}
-    NA               {n_cations}
-    CL				 {n_anions}
+    {cation}               {n_cations}
+    {anion}				 {n_anions}
     ''')
 
     out = open(filename, 'w')
@@ -98,7 +98,7 @@ def write_packmol(C, cation, anion, cation_charge=1, anion_charge=-1, n_waters=1
             'seed' : 123456,
             'tolerance' : 2.0,
             'filetype' : 'pdb',
-            'output' : filename.split('.inp')[0],
+            'output' : filename.split('.inp')[0] + '.pdb',
             'box' : 32
         }
 
@@ -112,7 +112,7 @@ def write_packmol(C, cation, anion, cation_charge=1, anion_charge=-1, n_waters=1
     n_anions = round(n_anions)
     print(f'So, adding {n_cations} cations and {n_anions} anions...')
 
-    top = update_topology(n_waters, n_cations, n_anions, filename=top)
+    top = update_topology(n_waters, n_cations, n_anions, filename=top, cation=cation.split('.pdb')[0].upper(), anion=anion.split('.pdb')[0].upper())
 
     f = dedent(f'''\
     #
@@ -205,6 +205,8 @@ if __name__ == '__main__':
     # parse inputs
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--conc', type=float, default=0.2, help='Concentration to which to solvate')
+    parser.add_argument('-ci', '--cation', type=str, default='Na.pdb', help='Name of pdb file with cation')
+    parser.add_argument('-ai', '--anion', type=str, default='Cl.pdb', help='Name of pdb file with anion')
     parser.add_argument('-g', '--gro', type=str, default='solution.gro', help='Name of the coordinate file to generate')
     parser.add_argument('-mm', '--min', type=str, default='min.mdp', help='Input mdp file for minimization')
     parser.add_argument('-mv', '--nvt', type=str, default='nvt.mdp', help='Input mdp file for NVT equilibration')
@@ -216,8 +218,8 @@ if __name__ == '__main__':
     args = parser.parse_args()    
 
     # run packmol to place ions in water
-    inp = write_packmol(args.conc, 'Na.pdb', 'Cl.pdb', cation_charge=1, anion_charge=-1,
-                        n_waters=1107, water='water.pdb', filename=args.inp, top=args.top)
+    inp = write_packmol(args.conc, args.cation, args.anion, cation_charge=1, anion_charge=-1,
+                        n_waters=1000, water='water.pdb', filename=args.inp, top=args.top)
     cmd = f'packmol < {inp}'
     run(cmd)
 

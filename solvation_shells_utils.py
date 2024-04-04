@@ -260,6 +260,38 @@ def run_plumed(plumed_input, traj, dt=0.002, stride=250, output='COLVAR'):
     return COLVAR
 
 
+def get_dehydration_energy(bins, fes, cn1, cn2):
+    '''
+    Calculate the dehydration energy from cn1 to cn2. This function fits a spline to the free energy surface
+    and estimates the energies as the spline evaluated at cn1 and cn2. For positive free energy, corresponding to
+    how much free energy is needed to strip a coordinated water, cn1 should be the higher energy coordination state.
+
+    Parameters
+    ----------
+    bins : np.array
+        Bins for the free energy surface in coordination number
+    fes : np.array
+        Free energy surface (kJ/mol)
+    cn1 : float
+        Coordination number of state 1 to calculate dG = G_1 - G_2
+    cn2 : float
+        Coordination number of state 2 to calculate dG = G_1 - G_2
+
+    Returns
+    -------
+    dG : float
+        Free energy difference between cn1 and cn2
+    
+    '''
+    
+    from scipy.interpolate import UnivariateSpline
+
+    spline = UnivariateSpline(bins, fes, k=4, s=0)
+    dG = spline(cn1) - spline(cn2)
+
+    return dG
+
+
 def unitize(v):
     '''Create a unit vector from vector v'''
     return v / np.linalg.norm(v)

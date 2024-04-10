@@ -11,9 +11,11 @@ def write_gif(files, output, fps=1):
             image = imageio.imread(f)
             writer.append_data(image)
 
-# Get all figures
-files = glob('/path/to/files/frame*.png')
 
-# Merge figures into a GIF
-print('Merging into GIF...')
-write_gif(files, 'movie.gif')
+if __name__ == '__main__':
+    # Get all figures
+    files = glob('/path/to/files/frame*.png')
+
+    # Merge figures into a GIF
+    print('Merging into GIF...')
+    write_gif(files, 'movie.gif')

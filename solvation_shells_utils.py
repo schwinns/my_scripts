@@ -384,7 +384,7 @@ class EquilibriumAnalysis:
         print(f"Hydration shell cutoff for anion-water = {self.solute_ai.radii['water']:.6f}")
     
 
-    def generate_rdfs(self, bin_width=0.05, range=(0,20), step=1):
+    def generate_rdfs(self, bin_width=0.05, range=(0,20), step=1, filename=None):
         '''
         Calculate radial distributions for the solution. This method calculates the RDFs for cation-water,
         anion-water, water-water, and cation-anion using MDAnalysis InterRDF. It saves the data in a 
@@ -395,9 +395,11 @@ class EquilibriumAnalysis:
         bin_width : float
             Width of the bins for the RDFs, default=0.05
         range : array-like
-            Range over which to calculate the RDF
+            Range over which to calculate the RDF, default=(0,20)
         step : int
-            Trajectory step for which to calculate the RDF
+            Trajectory step for which to calculate the RDF, default=1
+        filename : str
+            Filename to save RDF data, default=None means do not save to file
 
         Returns
         -------
@@ -426,6 +428,10 @@ class EquilibriumAnalysis:
         ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf')
         ci_ai.run(step=step)
         self.rdfs['ci-ai'] = ci_ai.results
+
+        if filename is not None:
+            data = np.vstack([ci_w.results.bins, ci_w.results.rdf, ai_w.results.rdf, w_w.results.rdf, ci_ai.results.rdf]).T
+            np.savetxt(filename, data, header='r (Angstroms), cation-water g(r), anion-water g(r), water-water g(r), cation-anion g(r)')
 
         return self.rdfs
     
@@ -1006,6 +1012,8 @@ class UmbrellaAnalysis:
         self.kT = self.kB*T
         self.beta = 1/self.kT
         self._fes = None
+        self.universe = None
+        self.coordination_numbers = None
 
         # read in collective variable files
         self.colvars = []
@@ -1016,7 +1024,10 @@ class UmbrellaAnalysis:
 
     
     def __repr__(self):
-        return f'UmbrellaAnalysis object with {len(self.colvars)} simulations'
+        if self.universe is not None:
+            return f'UmbrellaAnalysis object with {len(self.colvars)} simulations and {len(self.universe.trajectory)} frames'
+        else:
+            return f'UmbrellaAnalysis object with {len(self.colvars)} simulations'
 
         
     def calculate_FES(self, CN0_k, KAPPA=100, n_bootstraps=0, nbins=200, d_min=2, d_max=8, bw=0.02, mintozero=True, filename=None):
@@ -1221,6 +1232,153 @@ class UmbrellaAnalysis:
             dG = spline(cn1) - spline(cn2)
 
             return dG
+        
+
+    def rdfs_by_coordination(self, ion, CN_range, bin_width=0.05, range=(0,20)):
+        '''
+        Calculate radial distribution functions as a function of the coordination number. This method 
+        calculates the RDFs for cation-water, anion-water, water-water, and cation-anion using MDAnalysis 
+        InterRDF. It saves the data in a dictionary attribute `rdfs` with keys 'ci-w', 'ai-w', 'w-w', and 
+        'ci-ai'. Each key corresponds to a dictionary of coordination numbers. 
+        
+        Parameters
+        ----------
+        ion : str
+            Which ion is being biased, either 'cation' or 'anion'
+        CN_range : array-like
+            Range of coordination numbers to calculate the RDF for
+        bin_width : float
+            Width of the bins for the RDFs, default=0.05
+        range : array-like
+            Range over which to calculate the RDF, default=(0,20)
+
+        Returns
+        -------
+        rdfs : dict
+            Dictionary of dictionaries with all the results from InterRDF
+        
+        '''
+
+        if self.coordination_numbers is None:
+            raise ValueError('Discrete coordination number data not found. Try `get_coordination_numbers()` first')
+        
+        if ion == 'cation':
+            i = 0
+        elif ion == 'anion':
+            i = 1
+
+        from MDAnalysis.analysis import rdf
+
+        nbins = int((range[1] - range[0]) / bin_width)
+        self.rdfs = {
+            'ci-w'  : {},
+            'ai-w'  : {},
+            'w-w'   : {},
+            'ci-ai' : {}
+        }
+
+        for CN in CN_range:
+            idx = self.coordination_numbers[i,:] == CN
+            print(f'Coordination number {CN}: {idx.sum()} frames')
+
+            ci_w = rdf.InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf')
+            ci_w.run(frames=idx)
+            self.rdfs['ci-w'][CN] = ci_w.results
+
+            ai_w = rdf.InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf')
+            ai_w.run(frames=idx)
+            self.rdfs['ai-w'][CN] = ai_w.results
+
+            w_w = rdf.InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf')
+            w_w.run(frames=idx)
+            self.rdfs['w-w'][CN] = w_w.results
+
+            ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf')
+            ci_ai.run(frames=idx)
+            self.rdfs['ci-ai'][CN] = ci_ai.results
+
+        return self.rdfs
+
+
+    def create_Universe(self, top, traj=None, water='type OW', cation='resname NA', anion='resname CL'):
+        '''
+        Create an MDAnalysis Universe for the individual umbrella simulation.
+
+        Parameters
+        ----------
+        top : str
+            Name of the topology file (e.g. tpr, gro, pdb)
+        traj : str or list of str
+            Name(s) of the trajectory file(s) (e.g. xtc), default=None
+        water : str
+            MDAnalysis selection language for the water oxygen, default='type OW'
+        cation : str
+            MDAnalysis selection language for the cation, default='resname NA'
+        anion : str
+            MDAnalysis selection language for the anion, default='resname CL'
+
+        Returns
+        -------
+        universe : MDAnalysis.Universe object
+            MDAnalysis Universe with the toplogy and coordinates for this umbrella
+
+        '''
+
+        self.universe = mda.Universe(top, traj)    
+
+        self.waters = self.universe.select_atoms(water)
+        self.cations = self.universe.select_atoms(cation)
+        self.anions = self.universe.select_atoms(anion)
+
+        if len(self.waters) == 0:
+            raise ValueError(f'No waters found with selection {water}')
+        if len(self.cations) == 0:
+            raise ValueError(f'No cations found with selection {cation}')
+        if len(self.anions) == 0:
+            raise ValueError(f'No anions found with selection {anion}')
+    
+        return self.universe
+    
+
+    # TODO: get working for higher concentrations of ions
+    def get_coordination_numbers(self, cation_radius, anion_radius, step=1):
+        '''
+        Calculate the discrete water coordination number as a function of time for both cations and anions.
+        
+        Parameters
+        ----------
+        cation_radius : float
+            Hydration shell cutoff for the cation (Angstroms)
+        anion_radius : float
+            Hydration shell cutoff for the anion (Angstroms)
+        step : int
+            Trajectory step for which to calculate coordination numbers
+        
+        Returns
+        -------
+        avg_CN : np.array
+            Average coordination number over the trajectory for [cations, anions]
+        
+        '''
+
+        if self.universe is None:
+            raise NameError('No universe data found. Try `create_Universe()` first')
+
+        # initialize coordination number as a function of time
+        self.coordination_numbers = np.zeros((2,len(self.universe.trajectory[::step])))
+
+        for i,ts in enumerate(self.universe.trajectory[::step]):
+            # first for cations
+            d = distances.distance_array(self.cations, self.waters, box=ts.dimensions)
+            n_coordinating = (d <= cation_radius).sum()
+            self.coordination_numbers[0,i] = n_coordinating / len(self.cations)
+
+            # then for anions
+            d = distances.distance_array(self.anions, self.waters, box=ts.dimensions)
+            n_coordinating = (d <= anion_radius).sum()
+            self.coordination_numbers[1,i] = n_coordinating / len(self.anions)
+
+        return self.coordination_numbers.mean(axis=1)
 
 
     def _subsample_timeseries(self):

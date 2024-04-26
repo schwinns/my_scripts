@@ -1038,8 +1038,8 @@ class UmbrellaAnalysis:
         ----------
         CN0_k : array-like
             Coordination numbers at the umbrella simulation centers
-        KAPPA : float
-            Strength of the harmonic potential (kJ/mol/nm^2), default=100
+        KAPPA : float, array-like
+            Strength of the harmonic potential (kJ/mol/CN^2), default=100
         n_bootstraps : int
             Number of bootstraps for the uncertainty calculation, default=0
         nbins : int
@@ -1234,17 +1234,17 @@ class UmbrellaAnalysis:
             return dG
         
 
-    def rdfs_by_coordination(self, ion, CN_range, bin_width=0.05, range=(0,20)):
+    def rdfs_by_coordination(self, biased_ion, CN_range, bin_width=0.05, range=(0,20)):
         '''
-        Calculate radial distribution functions as a function of the coordination number. This method 
-        calculates the RDFs for cation-water, anion-water, water-water, and cation-anion using MDAnalysis 
-        InterRDF. It saves the data in a dictionary attribute `rdfs` with keys 'ci-w', 'ai-w', 'w-w', and 
-        'ci-ai'. Each key corresponds to a dictionary of coordination numbers. 
+        Calculate radial distribution functions as a function of the biased coordination number. This method 
+        calculates the RDFs for ion-water, ion-ion, and ion-coion using MDAnalysis InterRDF. It saves 
+        the data in a dictionary attribute `rdfs` with keys 'i-w', 'i-i', 'i-ci'. Each key corresponds 
+        to a dictionary of coordination numbers. 
         
         Parameters
         ----------
-        ion : str
-            Which ion is being biased, either 'cation' or 'anion'
+        biased_ion : str, MDAnalysis.AtomGroup
+            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
         CN_range : array-like
             Range of coordination numbers to calculate the RDF for
         bin_width : float
@@ -1262,40 +1262,45 @@ class UmbrellaAnalysis:
         if self.coordination_numbers is None:
             raise ValueError('Discrete coordination number data not found. Try `get_coordination_numbers()` first')
         
-        if ion == 'cation':
-            i = 0
-        elif ion == 'anion':
-            i = 1
+        # make biased_ion into MDAnalysis AtomGroup
+        if isinstance(biased_ion, str):
+            ion = self.universe.select_atoms(biased_ion)
+        else:
+            ion = biased_ion
+
+        # decide which ions are the same as the biased ion
+        if ion in self.cations:
+            ions = self.cations - ion
+            coions = self.anions - ion
+        elif ion in self.anions:
+            ions = self.anions - ion
+            coions = self.cations - ion
 
         from MDAnalysis.analysis import rdf
 
         nbins = int((range[1] - range[0]) / bin_width)
         self.rdfs = {
-            'ci-w'  : {},
-            'ai-w'  : {},
-            'w-w'   : {},
-            'ci-ai' : {}
+            'i-w'  : {},
+            'i-i'  : {},
+            'i-ci' : {}
         }
 
         for CN in CN_range:
-            idx = self.coordination_numbers[i,:] == CN
+            idx = self.coordination_numbers == CN
             print(f'Coordination number {CN}: {idx.sum()} frames')
 
-            ci_w = rdf.InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf')
-            ci_w.run(frames=idx)
-            self.rdfs['ci-w'][CN] = ci_w.results
+            if idx.sum() > 0:
+                i_w = rdf.InterRDF(ion, self.waters, nbins=nbins, range=range, norm='rdf')
+                i_w.run(frames=idx)
+                self.rdfs['i-w'][CN] = i_w.results
 
-            ai_w = rdf.InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf')
-            ai_w.run(frames=idx)
-            self.rdfs['ai-w'][CN] = ai_w.results
+                i_i = rdf.InterRDF(ion, ions, nbins=nbins, range=range, norm='rdf')
+                i_i.run(frames=idx)
+                self.rdfs['i-i'][CN] = i_i.results
 
-            w_w = rdf.InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf')
-            w_w.run(frames=idx)
-            self.rdfs['w-w'][CN] = w_w.results
-
-            ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf')
-            ci_ai.run(frames=idx)
-            self.rdfs['ci-ai'][CN] = ci_ai.results
+                i_ci = rdf.InterRDF(ion, coions, nbins=nbins, range=range, norm='rdf')
+                i_ci.run(frames=idx)
+                self.rdfs['i-ci'][CN] = i_ci.results
 
         return self.rdfs
 
@@ -1340,45 +1345,43 @@ class UmbrellaAnalysis:
         return self.universe
     
 
-    # TODO: get working for higher concentrations of ions
-    def get_coordination_numbers(self, cation_radius, anion_radius, step=1):
+    def get_coordination_numbers(self, biased_ion, radius, step=1):
         '''
-        Calculate the discrete water coordination number as a function of time for both cations and anions.
+        Calculate the discrete water coordination number as a function of time for biased ion.
         
         Parameters
         ----------
-        cation_radius : float
-            Hydration shell cutoff for the cation (Angstroms)
-        anion_radius : float
-            Hydration shell cutoff for the anion (Angstroms)
+        biased_ion : str, MDAnalysis.AtomGroup
+            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
+        radius : float
+            Hydration shell cutoff for the ion (Angstroms)
         step : int
             Trajectory step for which to calculate coordination numbers
         
         Returns
         -------
-        avg_CN : np.array
-            Average coordination number over the trajectory for [cations, anions]
+        coordination_numbers : np.array
+            Discrete coordination numbers over the trajectory
         
         '''
 
         if self.universe is None:
             raise NameError('No universe data found. Try `create_Universe()` first')
+        
+        # make biased_ion into MDAnalysis AtomGroup
+        if isinstance(biased_ion, str):
+            ion = self.universe.select_atoms(biased_ion)
+        else:
+            ion = biased_ion
 
         # initialize coordination number as a function of time
-        self.coordination_numbers = np.zeros((2,len(self.universe.trajectory[::step])))
+        self.coordination_numbers = np.zeros(len(self.universe.trajectory[::step]))
 
         for i,ts in enumerate(self.universe.trajectory[::step]):
-            # first for cations
-            d = distances.distance_array(self.cations, self.waters, box=ts.dimensions)
-            n_coordinating = (d <= cation_radius).sum()
-            self.coordination_numbers[0,i] = n_coordinating / len(self.cations)
+            d = distances.distance_array(ion, self.waters, box=ts.dimensions)
+            self.coordination_numbers[i] = (d <= radius).sum()
 
-            # then for anions
-            d = distances.distance_array(self.anions, self.waters, box=ts.dimensions)
-            n_coordinating = (d <= anion_radius).sum()
-            self.coordination_numbers[1,i] = n_coordinating / len(self.anions)
-
-        return self.coordination_numbers.mean(axis=1)
+        return self.coordination_numbers
 
 
     def _subsample_timeseries(self):
@@ -1447,8 +1450,8 @@ class UmbrellaAnalysis:
             Number of samples frum umbrella k
         d_kn : array-like
             d_kn[k,n] is the coordination number for snapshot n from umbrella simulation k
-        KAPPA : float
-            Strength of the harmonic potential (kJ/mol/nm^2), default=100
+        KAPPA : float, array-like
+            Strength of the harmonic potential (kJ/mol/CN^2), default=100
 
         Returns
         -------
@@ -1458,9 +1461,18 @@ class UmbrellaAnalysis:
 
         '''
 
+
         K = len(self.colvars)                       # number of umbrellas
         beta_k = np.ones(K) * self.beta             # inverse temperature of simulations (in 1/(kJ/mol)) 
-        K_k = np.ones(K)*KAPPA                      # spring constant (in kJ/mol/nm**2) for different simulations
+
+        # spring constant (in kJ/mol/CN^2) for different simulations
+        # coerce into a np.array
+        if isinstance(KAPPA, (float, int)): 
+            K_k = np.ones(K)*KAPPA                   
+        elif not isinstance(KAPPA, np.ndarray):
+            K_k = np.array(KAPPA)
+        else:
+            K_k = KAPPA
 
         for k in range(K):
             for n in range(N_k[k]):

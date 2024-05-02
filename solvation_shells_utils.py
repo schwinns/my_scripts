@@ -1030,7 +1030,7 @@ class UmbrellaAnalysis:
             return f'UmbrellaAnalysis object with {len(self.colvars)} simulations'
 
         
-    def calculate_FES(self, CN0_k, KAPPA=100, n_bootstraps=0, nbins=200, d_min=2, d_max=8, bw=0.02, mintozero=True, filename=None):
+    def calculate_FES(self, CN0_k, KAPPA=100, n_bootstraps=0, nbins=200, d_min=2, d_max=8, bw=0.02, error=True, mintozero=True, filename=None):
         '''
         Calculate the free energy surface with pymbar
         
@@ -1050,6 +1050,8 @@ class UmbrellaAnalysis:
             Maximum coordination number for the free energy surface
         bw : float
             Bandwidth for the KDE
+        error : bool
+            Calculate error. If True and n_bootstraps > 0, then will calculate the bootstrapped error. Otherwise, calculates the analytical histogram error, default=True
         mintozero : bool
             Shift the minimum of the free energy surface to 0
         filename : str
@@ -1067,7 +1069,7 @@ class UmbrellaAnalysis:
         import pymbar
 
         # Step 1: Subsample timeseries
-        u_kn, u_kln, N_k, d_kn = self._subsample_timeseries()
+        u_kn, u_kln, N_k, d_kn = self._subsample_timeseries(error=error)
         
         # Step 2: Bin the data
         bin_center_i = np.zeros([nbins])
@@ -1082,7 +1084,11 @@ class UmbrellaAnalysis:
         fes = pymbar.FES(u_kln, N_k, verbose=False)
         kde_params = {'bandwidth' : bw}
         d_n = pymbar.utils.kn_to_n(d_kn, N_k=N_k)
-        if n_bootstraps == 0:
+        if not error:
+            fes.generate_fes(u_kn, d_n, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges})
+            results = fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method=None)
+            results['df_i'] = np.zeros(len(results['f_i']))
+        elif n_bootstraps == 0:
             fes.generate_fes(u_kn, d_n, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges})
             results = fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method='analytical')
         else:
@@ -1384,10 +1390,15 @@ class UmbrellaAnalysis:
         return self.coordination_numbers
 
 
-    def _subsample_timeseries(self):
+    def _subsample_timeseries(self, error=True):
         '''
         Subsample the timeseries to get uncorrelated samples. This function also sets up the variables 
         needed for pymbar.MBAR object and pymbar.FES object.
+
+        Parameters
+        ----------
+        error : bool
+            Calculate error. If False, we do not need to subsample timeseries, default=True
         
         Returns
         -------
@@ -1418,15 +1429,19 @@ class UmbrellaAnalysis:
             d_kn[k] = self.colvars[k].coordination_number
             N_k[k] = len(d_kn[k])
             d_temp = d_kn[k, 0:N_k[k]]
-            g_k[k] = timeseries.statistical_inefficiency(d_temp)     
-            print(f"Statistical inefficiency of simulation {k}: {g_k[k]:.3f}")
-            indices = timeseries.subsample_correlated_data(d_temp, g=g_k[k]) # indices of the uncorrelated samples
+            if error:
+                g_k[k] = timeseries.statistical_inefficiency(d_temp)     
+                print(f"Statistical inefficiency of simulation {k}: {g_k[k]:.3f}")
+                indices = timeseries.subsample_correlated_data(d_temp, g=g_k[k]) # indices of the uncorrelated samples
+            else:
+                indices = np.arange(len(self.colvars[k].coordination_number))
             
-            # Update u_kn and d_kn with uncorrelated samples
+            # Update u_kn and d_kn with uncorrelated samples if calculating error
             N_k[k] = len(indices)    # At this point, N_k contains the number of uncorrelated samples for each state k                
             u_kn[k, 0:N_k[k]] = u_kn[k, indices]
             d_kn[k, 0:N_k[k]] = d_kn[k, indices]
-            self.uncorrelated_samples.append(d_kn[k, indices])
+            if error:
+                self.uncorrelated_samples.append(d_kn[k, indices])
 
         N_max = np.max(N_k) # shorten the array size
         u_kln = np.zeros([K, K, N_max]) # u_kln[k,n] is the reduced potential energy of snapshot n from umbrella simulation k

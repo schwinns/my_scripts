@@ -1311,6 +1311,88 @@ class UmbrellaAnalysis:
         return self.rdfs
 
 
+    def angular_distributions_by_coordination(self, biased_ion, CN_range, bin_width=0.05, range=(1,10)):
+        '''
+        Calculate water angular distributions as a function of the biased coordination number. This method
+        saves the data in a dictionary attribute `angular_distributions` with keys 'theta' and 'phi'. 
+        
+        Parameters
+        ----------
+        biased_ion : str, MDAnalysis.AtomGroup
+            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
+        CN_range : array-like
+            Range of coordination numbers to calculate the distributions for
+        bin_width : float
+            Width of the bins in the r direction, default=0.05
+        range : array-like
+            Radial range over which to calculate the distributions, default=(1,10)
+
+        Returns
+        -------
+        angular_distributions : dict
+            Dictionary of dictionaries with all the results
+        
+        '''
+
+        if self.coordination_numbers is None:
+            raise ValueError('Discrete coordination number data not found. Try `get_coordination_numbers()` first')
+        
+        # make biased_ion into MDAnalysis AtomGroup
+        if isinstance(biased_ion, str):
+            ion = self.universe.select_atoms(biased_ion)
+        else:
+            ion = biased_ion
+
+        nbins = int((range[1] - range[0]) / bin_width)
+        rbins = np.linspace(range[0], range[1], nbins)
+        thbins = np.linspace(0,180, nbins)
+        phbins = np.linspace(-180,180, nbins)
+
+        self.angular_distributions = {
+            'theta' : {},
+            'phi' : {}
+        }
+
+        for CN in CN_range:
+            th_hist,th_x,th_y = np.histogram2d([], [], bins=[rbins,thbins])
+            ph_hist,ph_x,ph_y = np.histogram2d([], [], bins=[rbins,phbins])
+
+            idx = self.coordination_numbers == CN
+            print(f'Coordination number {CN}: {idx.sum()} frames')
+
+            if idx.sum() > 0:
+                for i, ts in enumerate(self.universe.trajectory[idx]):
+                    d = distances.distance_array(mda.AtomGroup([biased_ion]), self.waters, box=ts.dimensions)
+                    closest_water = self.waters[d.argmin()]
+                    self.universe.atoms.translate(-biased_ion.position) # set the ion as the origin
+                    my_waters = self.waters.select_atoms(f'(point 0 0 0 {range[1]}) and (not index {closest_water.index})', updating=True) # select only waters near the ion
+
+                    if len(my_waters) > 0:
+                        # rotate system so z axis is oriented with ion-closest water vector
+                        v2 = np.array([0,0,1])
+                        rotation_matrix = self._rotation_matrix_from_vectors(closest_water.position, v2)
+                        positions = rotation_matrix.dot(my_waters.positions.T).T
+
+                        # convert to spherical coordinates, centered at the ion
+                        r = np.sqrt(positions[:,0]**2 + positions[:,1]**2 + positions[:,2]**2)
+                        th = np.degrees(np.arccos(positions[:,2] / r))
+                        ph = np.degrees(np.arctan2(positions[:,1], positions[:,0]))
+
+                        # histogram to get the probability density
+                        h1,_,_ = np.histogram2d(r, th, bins=[rbins,thbins])
+                        h2,_,_ = np.histogram2d(r, ph, bins=[rbins,phbins])
+                        
+                        th_hist += h1
+                        ph_hist += h2
+
+                th_data = {'r' : th_x, 'theta' : th_y, 'hist' : th_hist.T}
+                ph_data = {'r' : ph_x, 'phi' : ph_y, 'hist' : ph_hist.T}
+                self.angular_distributions['theta'][CN] = th_data
+                self.angular_distributions['phi'][CN] = ph_data
+
+        return self.angular_distributions
+
+
     def create_Universe(self, top, traj=None, water='type OW', cation='resname NA', anion='resname CL'):
         '''
         Create an MDAnalysis Universe for the individual umbrella simulation.
@@ -1548,6 +1630,22 @@ class UmbrellaAnalysis:
         minima_vals = self.spline(minima_locs)
 
         return minima_locs, minima_vals
+
+
+    # from https://stackoverflow.com/questions/45142959/calculate-rotation-matrix-to-align-two-vectors-in-3d-space
+    def _rotation_matrix_from_vectors(vec1, vec2):
+        """ Find the rotation matrix that aligns vec1 to vec2
+        :param vec1: A 3d "source" vector
+        :param vec2: A 3d "destination" vector
+        :return mat: A transform matrix (3x3) which when applied to vec1, aligns it with vec2.
+        """
+        a, b = (vec1 / np.linalg.norm(vec1)).reshape(3), (vec2 / np.linalg.norm(vec2)).reshape(3)
+        v = np.cross(a, b)
+        c = np.dot(a, b)
+        s = np.linalg.norm(v)
+        kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+        return rotation_matrix
 
 
 

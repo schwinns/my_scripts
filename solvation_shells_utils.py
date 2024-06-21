@@ -1318,8 +1318,8 @@ class UmbrellaAnalysis:
         
         Parameters
         ----------
-        biased_ion : str, MDAnalysis.AtomGroup
-            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
+        biased_ion : MDAnalysis.Atom
+            An MDAnalysis Atom of the biased ion
         CN_range : array-like
             Range of coordination numbers to calculate the distributions for
         bin_width : float
@@ -1336,12 +1336,6 @@ class UmbrellaAnalysis:
 
         if self.coordination_numbers is None:
             raise ValueError('Discrete coordination number data not found. Try `get_coordination_numbers()` first')
-        
-        # make biased_ion into MDAnalysis AtomGroup
-        if isinstance(biased_ion, str):
-            ion = self.universe.select_atoms(biased_ion)
-        else:
-            ion = biased_ion
 
         nbins = int((range[1] - range[0]) / bin_width)
         rbins = np.linspace(range[0], range[1], nbins)
@@ -1633,7 +1627,7 @@ class UmbrellaAnalysis:
 
 
     # from https://stackoverflow.com/questions/45142959/calculate-rotation-matrix-to-align-two-vectors-in-3d-space
-    def _rotation_matrix_from_vectors(vec1, vec2):
+    def _rotation_matrix_from_vectors(self,vec1, vec2):
         """ Find the rotation matrix that aligns vec1 to vec2
         :param vec1: A 3d "source" vector
         :param vec2: A 3d "destination" vector

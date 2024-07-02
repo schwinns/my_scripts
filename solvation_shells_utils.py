@@ -866,11 +866,59 @@ class UmbrellaSim:
         '''
         
         tmp = np.loadtxt(COLVAR_file, comments='#')
-        self.data = pd.DataFrame(tmp[start:stop:by,:], columns=['time', 'n', 't', 'r.bias', 'r.force2'])
+        # self.data = pd.DataFrame(tmp[start:stop:by,:], columns=['time', 'n', 't', 'r.bias', 'r.force2'])
+        # self.time = self.data.time.to_numpy()
+        # self.coordination_number = self.data.t.to_numpy()
+        # self.bias = self.data['r.bias'].to_numpy()
+        # self.force = self.data['r.force2'].to_numpy()
+        cols = ['time', 'n1', 't1', 'r1.bias', 'r1.force2', 'n2', 't2', 'r2.bias', 'r2.force2']
+        self.data = pd.DataFrame(tmp[start:stop:by,:], columns=cols)
         self.time = self.data.time.to_numpy()
-        self.coordination_number = self.data.t.to_numpy()
-        self.bias = self.data['r.bias'].to_numpy()
-        self.force = self.data['r.force2'].to_numpy()
+        self.water_coordination_number = self.data.t1.to_numpy()
+        self.ion_coordination_number = self.data.t2.to_numpy()
+        self.water_bias = self.data['r1.bias'].to_numpy()
+        self.ion_bias = self.data['r2.bias'].to_numpy()
+
+
+    def get_coordination_numbers(self, biased_ion, group, radius, step=1):
+        '''
+        Calculate the discrete water coordination number as a function of time for biased ion.
+        
+        Parameters
+        ----------
+        biased_ion : MDAnalysis.AtomGroup
+            MDAnalysis AtomGroup of the biased ion
+        group : MDAnalysis.AtomGroup
+            MDAnalysis AtomGroup of the group to calculate the coordination numbers for (e.g. waters, cations, anions)
+        radius : float
+            Hydration shell cutoff for the ion (Angstroms)
+        step : int
+            Trajectory step for which to calculate coordination numbers
+        
+        Returns
+        -------
+        discrete_coordination_numbers : np.array
+            Discrete coordination numbers over the trajectory
+        
+        '''
+
+        if self.universe is None:
+            raise NameError('No universe data found. Try `create_Universe()` first')
+        
+        # make biased_ion into MDAnalysis AtomGroup
+        if isinstance(biased_ion, str):
+            ion = self.universe.select_atoms(biased_ion)
+        else:
+            ion = biased_ion
+
+        # initialize coordination number as a function of time
+        self.discrete_coordination_numbers = np.zeros(len(self.universe.trajectory[::step]))
+
+        for i,ts in enumerate(self.universe.trajectory[::step]):
+            d = distances.distance_array(ion, group, box=ts.dimensions)
+            self.discrete_coordination_numbers[i] = (d <= radius).sum()
+
+        return self.discrete_coordination_numbers
 
 
     def get_performance(self, log_file='prod.log'):

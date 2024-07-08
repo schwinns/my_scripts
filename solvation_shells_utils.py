@@ -866,18 +866,24 @@ class UmbrellaSim:
         '''
         
         tmp = np.loadtxt(COLVAR_file, comments='#')
-        # self.data = pd.DataFrame(tmp[start:stop:by,:], columns=['time', 'n', 't', 'r.bias', 'r.force2'])
-        # self.time = self.data.time.to_numpy()
-        # self.coordination_number = self.data.t.to_numpy()
-        # self.bias = self.data['r.bias'].to_numpy()
-        # self.force = self.data['r.force2'].to_numpy()
-        cols = ['time', 'n1', 't1', 'r1.bias', 'r1.force2', 'n2', 't2', 'r2.bias', 'r2.force2']
-        self.data = pd.DataFrame(tmp[start:stop:by,:], columns=cols)
-        self.time = self.data.time.to_numpy()
-        self.water_coordination_number = self.data.t1.to_numpy()
-        self.ion_coordination_number = self.data.t2.to_numpy()
-        self.water_bias = self.data['r1.bias'].to_numpy()
-        self.ion_bias = self.data['r2.bias'].to_numpy()
+
+        if tmp.shape[1] == 5: # for a single restrain
+            cols = ['time', 'n', 't', 'r.bias', 'r.force2']
+            self.data = pd.DataFrame(tmp[start:stop:by,:], columns=cols)
+            self.time = self.data.time.to_numpy()
+            self.coordination_number = self.data.t.to_numpy()
+            self.bias = self.data['r.bias'].to_numpy()
+            self.force = self.data['r.force2'].to_numpy()
+        elif tmp.shape[1] == 9: # for 2 restraints in water and ion coordination
+            cols = ['time', 'n1', 't1', 'r1.bias', 'r1.force2', 'n2', 't2', 'r2.bias', 'r2.force2']
+            self.data = pd.DataFrame(tmp[start:stop:by,:], columns=cols)
+            self.time = self.data.time.to_numpy()
+            self.coordination_number = self.data.t1.to_numpy()
+            self.ion_coordination_number = self.data.t2.to_numpy()
+            self.water_bias = self.data['r1.bias'].to_numpy()
+            self.ion_bias = self.data['r2.bias'].to_numpy()
+        else:
+            raise ValueError(f'Cannot read file {COLVAR_file}')
 
 
     def get_coordination_numbers(self, biased_ion, group, radius, step=1):
@@ -1160,6 +1166,28 @@ class UmbrellaAnalysis:
             np.savetxt(filename, np.vstack([self.bin_centers, self.fes, self.error]).T, header='coordination number, free energy (kJ/mol), error (kJ/mol)')
 
         return self.bin_centers, self.fes
+
+    
+    def show_overlap(self):
+        '''
+        Compute the overlap matrix and plot as a heatmap
+        
+        Returns
+        -------
+        heatmap : sns.Axes
+            Heatmap of overlap from seaborn
+        
+        '''
+
+        import seaborn as sns
+        
+        overlap = self._fes.mbar.compute_overlap()
+
+        df = pd.DataFrame(overlap['matrix'], columns=[i for i in range(len(self.colvars))])
+        fig, ax = plt.subplots(1,1, figsize=(10,8))
+        heatmap = sns.heatmap(df, annot=True, fmt='.2f', ax=ax)
+
+        return heatmap
     
 
     def average_coordination_number(self, CN0_k=None, KAPPA=100):
@@ -1547,9 +1575,14 @@ class UmbrellaAnalysis:
         d_kn = np.zeros([K, N_max])                 # d_kn[k,n] is the coordination number for snapshot n from umbrella simulation k
         u_kn = np.zeros([K, N_max])                 # u_kn[k,n] is the reduced potential energy without umbrella restraints of snapshot n of umbrella simulation k
         self.uncorrelated_samples = []              # Uncorrelated samples of different simulations
+        ion_restraint = (self.colvars[0].data.shape[1] == 9) # determine if there is an ion coordination restraint
 
         # Step 1b: Read in and subsample the timeseries
         for k in range(K):
+            # if using 2 restraints, calculate the potential from the ion coordination restraint
+            if ion_restraint:
+                u_kn[k] = self.beta * 10000/2 * self.colvars[k].ion_coordination_number**2 # KAPPA = 10,0000 and centered at CN = 0
+
             d_kn[k] = self.colvars[k].coordination_number
             N_k[k] = len(d_kn[k])
             d_temp = d_kn[k, 0:N_k[k]]

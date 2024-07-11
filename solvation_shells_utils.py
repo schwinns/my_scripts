@@ -1123,6 +1123,7 @@ class UmbrellaAnalysis:
         import pymbar
 
         # Step 1: Subsample timeseries
+        print('Subsampling timeseries...')
         u_kn, u_kln, N_k, d_kn = self._subsample_timeseries(error=error)
         
         # Step 2: Bin the data
@@ -1132,9 +1133,11 @@ class UmbrellaAnalysis:
             bin_center_i[i] = 0.5 * (bin_edges[i] + bin_edges[i + 1])
 
         # Step 3: Evaluate reduced energies in all umbrellas
+        print('Evaluating energies...')
         u_kln = self._evaluate_reduced_energies(CN0_k, u_kn, u_kln, N_k, d_kn, KAPPA)
 
         # Step 4: Compute and output the FES
+        print('Calculating the free energy surface...')
         fes = pymbar.FES(u_kln, N_k, verbose=False)
         kde_params = {'bandwidth' : bw}
         d_n = pymbar.utils.kn_to_n(d_kn, N_k=N_k)
@@ -1153,6 +1156,7 @@ class UmbrellaAnalysis:
             results['f_i'] = results['f_i'] - results['f_i'].min()
 
         # Step 5: Save FES information in the object
+        print('Saving results...')
         self.umbrella_centers = CN0_k
         self._u_kln = u_kln
         self._N_k = N_k

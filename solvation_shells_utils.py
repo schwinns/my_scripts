@@ -819,6 +819,11 @@ class EquilibriumAnalysis:
                 pos = self._unwrap_shell(ion, r0, ts)
                 center = ion.position
 
+                if len(shell) < 4: # cannot create a polyhedron
+                    results.volumes[j,i] = np.nan
+                    results.areas[j,i] = np.nan
+                    continue
+
                 # Create the polyhedron with a ConvexHull and save volume
                 hull = ConvexHull(pos)
                 results.volumes[j,i] = hull.volume
@@ -865,7 +870,8 @@ class EquilibriumAnalysis:
                 
                 results.areas[j,i] = area
 
-            return results
+
+        return results
 
     
     def _unwrap_shell(self, ion, r0, ts):
@@ -895,7 +901,7 @@ class EquilibriumAnalysis:
             dist = ion.position - water.position
             for d in range(3):
                 if np.abs(dist[d]) > ts.dimensions[d]/2: # if distance is more than half the box
-                    if dist < 0:
+                    if dist[d] < 0:
                         positions[w,d] = water.position[d] - ts.dimensions[d]
                     else:
                         positions[w,d] = water.position[d] + ts.dimensions[d]

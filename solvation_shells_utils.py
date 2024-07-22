@@ -231,11 +231,11 @@ def write_sbatch_umbrella(options, filename='submit.job'):
     #SBATCH -p RM-shared
     #SBATCH -J '{options['job']}_{options['sim_num']}'
     #SBATCH -o '%x.out'
-    #SBATCH --mail-type=ALL
+    #SBATCH --mail-type=END
     #SBATCH --mail-user=nasc4134@colorado.edu
 
     module load gcc
-    module load openmpi
+    module load openmpi/4.0.2-gcc8.3.1
 
     source /jet/home/schwinns/.bashrc
     source /jet/home/schwinns/pkgs/gromacs-plumed/bin/GMXRC
@@ -393,7 +393,7 @@ class EquilibriumAnalysis:
         Parameters
         ----------
         bin_width : float
-            Width of the bins for the RDFs, default=0.05
+            Width of the bins for the RDFs, default=0.05 Angstroms
         range : array-like
             Range over which to calculate the RDF, default=(0,20)
         step : int

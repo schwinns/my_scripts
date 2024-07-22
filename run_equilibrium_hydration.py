@@ -22,9 +22,9 @@ if __name__ == '__main__':
     cation_label = 'Na$^+$'
     anion_label = 'Cl$^-$'
 
-    get_RDFs = False
-    get_shell_probs = True
-    get_coordination_number = True
+    get_RDFs = True
+    get_shell_probs = False
+    get_coordination_number = False
 
     # intialize and calculate cutoffs
     eq = EquilibriumAnalysis(tpr, xtc, cation=cation, anion=anion)
@@ -34,7 +34,7 @@ if __name__ == '__main__':
     # Generate RDFs for cation-water, anion-water, water-water, and cation-anion
     if get_RDFs:
         print('Calculating RDFs...')
-        rdfs = eq.generate_rdfs(step=1)
+        rdfs = eq.generate_rdfs(step=1, filename='rdfs.dat')
 
     # Calculate the fraction of shells present in the simulation
     if get_shell_probs:

@@ -1657,8 +1657,9 @@ class UmbrellaAnalysis:
             with Pool(n) as worker_pool:
                 result = worker_pool.map(run_per_frame, frame_values)
 
-            print(len(result), result)
-
+            result = np.asarray(result)
+            results.areas = result[:,0]
+            results.volumes = result[:,1]
 
         return results
 

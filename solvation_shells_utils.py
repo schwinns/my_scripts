@@ -1887,7 +1887,7 @@ class UmbrellaAnalysis:
         return f
 
 
-    def _polyhedron_size_per_frame(self, frame_idx, biased_ion, r0=3.15):
+    def _polyhedron_size_per_frame(self, frame_idx, biased_ion, r0=3.15, for_visualization=False):
         '''
         Construct a polyhedron from the atoms in a hydration shell and calculate the volume of the polyhedron
         and the maximum cross-sectional area of the polyhedron. The cross-sections are taken along the first 
@@ -1901,6 +1901,8 @@ class UmbrellaAnalysis:
             Biased ion in the simulation to calculate polyhedrons for
         r0 : float
             Hydration shell cutoff for the biased ion in Angstroms, default=3.15
+        for_visualization : bool
+            Whether to use this function to output points for visualization, default=False
 
         Returns
         -------
@@ -1970,9 +1972,13 @@ class UmbrellaAnalysis:
                 intersection_hull = ConvexHull(projected_points)
 
                 if intersection_hull.volume > area:
+                    saved_points = (pt, intersection_points, projected_points, mean_point)
                     area = intersection_hull.volume
 
-        return area, volume
+        if for_visualization:
+            return area, volume, saved_points
+        else:
+            return area, volume
     
 
     def _unwrap_shell(self, ion, r0):

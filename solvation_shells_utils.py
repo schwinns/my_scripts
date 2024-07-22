@@ -6,11 +6,14 @@ import pandas as pd
 
 import MDAnalysis as mda
 from MDAnalysis.analysis import distances
+from MDAnalysis.analysis.base import Results
 
 import subprocess
 from textwrap import dedent
 from glob import glob
+from tqdm import tqdm
 
+from linear_algebra import *
 
 def run(commands):
     '''Run commands with subprocess'''
@@ -290,20 +293,6 @@ def get_dehydration_energy(bins, fes, cn1, cn2):
     dG = spline(cn1) - spline(cn2)
 
     return dG
-
-
-def unitize(v):
-    '''Create a unit vector from vector v'''
-    return v / np.linalg.norm(v)
-
-
-def get_angle(v1, v2):
-    '''Get the angle between two vectors v1 and v2'''
-    
-    v1 = unitize(v1)
-    v2 = unitize(v2)
-
-    return np.arccos(np.clip(np.dot(v1, v2), -1.0, 1.0))
 
 
 class EquilibriumAnalysis:
@@ -775,6 +764,151 @@ class EquilibriumAnalysis:
         fig.show()
 
         return hist, (X,Y,Z)
+    
+
+    def polyhedron_size(self, ion='cation', step=1):
+        '''
+        Construct a polyhedron from the waters in a hydration shell and calculate the volume of the polyhedron
+        and the maximum cross-sectional area of the polyhedron. The cross-sections are taken along the first 
+        principal component of the vertices of the polyhedron.
+
+        Parameters
+        ----------
+        ion : str
+            Whether to calculate the volumes and areas for the cations or anions, options are `cation` and `anion`
+        step : int
+            Trajectory step for analysis
+
+        Returns
+        -------
+        results : MDAnalysis.analysis.base.Results object
+            Volume and area time series, saved in `volumes` and `areas` attributes
+        
+        '''
+
+        from scipy.spatial import ConvexHull
+        from sklearn.decomposition import PCA
+
+        if ion == 'cation':
+            ions = self.cations
+            try:
+                r0 = self.solute_ci.radii['water']
+            except NameError:
+                print('Solutes not initialized. Try `initialize_Solutes()` first')
+
+        elif ion == 'anion':
+            ions = self.anions
+            try:
+                r0 = self.solute_ai.radii['water']
+            except NameError:
+                print('Solutes not initialized. Try `initialize_Solutes()` first')
+
+        else:
+            raise NameError("Options for kwarg ion are 'cation' or 'anion'")
+        
+        # Prepare the Results object
+        results = Results()
+        results.areas = np.zeros((len(ions), len(self.universe.trajectory[::step])))
+        results.volumes = np.zeros((len(ions), len(self.universe.trajectory[::step])))
+
+        for i,ts in tqdm(enumerate(self.universe.trajectory[::step])):
+            for j,ion in enumerate(ions):
+
+                # Unwrap the shell
+                shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index}) and (type OW)')
+                pos = self._unwrap_shell(ion, r0, ts)
+                center = ion.position
+
+                if len(shell) < 4: # cannot create a polyhedron
+                    results.volumes[j,i] = np.nan
+                    results.areas[j,i] = np.nan
+                    continue
+
+                # Create the polyhedron with a ConvexHull and save volume
+                hull = ConvexHull(pos)
+                results.volumes[j,i] = hull.volume
+
+                # Get the major axis (first principal component)
+                pca = PCA(n_components=3).fit(pos[hull.vertices])
+
+                # Find all the edges of the convex hull
+                edges = []
+                for simplex in hull.simplices:
+                    for s in range(len(simplex)):
+                        edge = tuple(sorted((simplex[s], simplex[(s + 1) % len(simplex)])))
+                        edges.append(edge)
+
+                # Create a line through the polyhedron along the principal component
+                d = distances.distance_array(shell, shell, box=ts.dimensions)
+                t_values = np.linspace(-d.max()/2, d.max()/2, 100)
+                center_line = np.array([center + t*pca.components_[0,:] for t in t_values])
+
+                # Find the maximum cross-sectional area along the line through polyhedron
+                area = 0
+                for pt in center_line:
+                    # Find the plane normal to the principal component
+                    A, B, C, D = create_plane_from_point_and_normal(pt, pca.components_[0,:])
+
+                    # Find the intersection points of the hull edges with the slicing plane
+                    intersection_points = []
+                    for edge in edges:
+                        p1 = pos[edge[0]]
+                        p2 = pos[edge[1]]
+                        intersection_point = line_plane_intersection(p1, p2, A, B, C, D)
+                        if intersection_point is not None:
+                            intersection_points.append(intersection_point)
+
+                    # If a slicing plane exists and its area is larger than any other, save
+                    if len(intersection_points) > 0:
+                        intersection_points = np.array(intersection_points)
+                        projected_points, rot_mat, mean_point = project_to_plane(intersection_points)
+                        intersection_hull = ConvexHull(projected_points)
+
+                        if intersection_hull.volume > area:
+                            saved_points = (pt, intersection_points, projected_points, mean_point)
+                            area = intersection_hull.volume
+                
+                results.areas[j,i] = area
+
+
+        return results
+
+    
+    def _unwrap_shell(self, ion, r0, ts):
+        '''
+        Unwrap the hydration shell, so all coordinated waters are on the same side of the box as ion.
+
+        Parameters
+        ----------
+        ion : MDAnalysis.Atom
+            Ion whose shell to unwrap
+        r0 : float
+            Hydration shell radius for the ion
+        ts : MDAnalysis.coordinates.timestep.TimeStep
+            Timestep in the trajectory, critically, should have dimensions of the box
+
+        Returns
+        -------
+        positions : np.ndarray
+            Unwrapped coordinated for the waters in the shell
+
+        '''
+
+        shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index}) and (type OW)')
+        
+        positions = np.zeros((len(shell), 3))
+        for w,water in enumerate(shell):
+            dist = ion.position - water.position
+            for d in range(3):
+                if np.abs(dist[d]) > ts.dimensions[d]/2: # if distance is more than half the box
+                    if dist[d] < 0:
+                        positions[w,d] = water.position[d] - ts.dimensions[d]
+                    else:
+                        positions[w,d] = water.position[d] + ts.dimensions[d]
+                else:
+                    positions[w,d] = water.position[d]
+
+        return positions
 
 
 class MetaDAnalysis:
@@ -1465,7 +1599,68 @@ class UmbrellaAnalysis:
                 self.angular_distributions['phi'][CN] = ph_data
 
         return self.angular_distributions
+    
 
+    def polyhedron_size(self, biased_ion, r0=3.15, njobs=1):
+        '''
+        Calculate the maximum cross-sectional areas and volumes as time series for coordination shells.
+        Construct a polyhedron from the atoms in a hydration shell and calculate the volume of the polyhedron
+        and the maximum cross-sectional area of the polyhedron. The cross-sections are taken along the first 
+        principal component of the vertices of the polyhedron.
+
+        Parameters
+        ----------
+        biased_ion : str, MDAnalysis.AtomGroup
+            Biased ion in the simulation to calculate polyhedrons for
+        njobs : int
+            How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
+            distribute the analysis. If -1, use all available processors.
+
+        Returns
+        -------
+        area, volume : float
+            Volume and maximum cross-sectional area for the polyhedron
+        
+        '''
+
+        if self.universe is None:
+            raise ValueError('No underlying MDAnalysis.Universe. Try `create_Universe()` first')
+
+        # prepare the Results object
+        results = Results()
+        results.areas = np.zeros(len(self.universe.trajectory))
+        results.volumes = np.zeros(len(self.universe.trajectory))
+
+        if njobs == 1: # run on 1 CPU
+
+            for i,ts in tqdm(enumerate(self.universe.trajectory)):
+                a,v = self._polyhedron_size_per_frame(i, biased_ion, r0=r0)
+                results.areas[i] = a
+                results.volumes[i] = v
+
+        else: # run in parallel
+
+            import multiprocessing
+            from multiprocessing import Pool
+            from functools import partial
+            
+            if njobs == -1:
+                n = multiprocessing.cpu_count()
+            else:
+                n = njobs
+
+            run_per_frame = partial(self._polyhedron_size_per_frame,
+                                    biased_ion=biased_ion,
+                                    r0=r0)
+            frame_values = np.arange(self.universe.trajectory.n_frames)
+
+            with Pool(n) as worker_pool:
+                result = worker_pool.map(run_per_frame, frame_values)
+
+            print(len(result), result)
+
+
+        return results
 
     def create_Universe(self, top, traj=None, water='type OW', cation='resname NA', anion='resname CL'):
         '''
@@ -1689,7 +1884,131 @@ class UmbrellaAnalysis:
         f = UnivariateSpline(bins, fes, k=4, s=0)
         
         return f
+
+
+    def _polyhedron_size_per_frame(self, frame_idx, biased_ion, r0=3.15):
+        '''
+        Construct a polyhedron from the atoms in a hydration shell and calculate the volume of the polyhedron
+        and the maximum cross-sectional area of the polyhedron. The cross-sections are taken along the first 
+        principal component of the vertices of the polyhedron.
+
+        Parameters
+        ----------
+        frame_idx : int
+            Index of the frame
+        biased_ion : str, MDAnalysis.AtomGroup
+            Biased ion in the simulation to calculate polyhedrons for
+        r0 : float
+            Hydration shell cutoff for the biased ion in Angstroms, default=3.15
+
+        Returns
+        -------
+        area, volume : float
+            Volume and maximum cross-sectional area for the polyhedron
+        
+        '''
+
+        from scipy.spatial import ConvexHull
+        from sklearn.decomposition import PCA
     
+        # make biased_ion into MDAnalysis AtomGroup
+        if isinstance(biased_ion, str):
+            ion = self.universe.select_atoms(biased_ion)
+        else:
+            ion = biased_ion
+        
+        # initialize the frame
+        self.universe.trajectory[frame_idx]
+
+        # Unwrap the shell
+        shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
+        pos = self._unwrap_shell(ion, r0)
+        center = ion.position
+
+        if len(shell) < 4: # cannot create a polyhedron
+            return np.nan, np.nan
+
+        # Create the polyhedron with a ConvexHull and save volume
+        hull = ConvexHull(pos)
+        volume = hull.volume
+
+        # Get the major axis (first principal component)
+        pca = PCA(n_components=3).fit(pos[hull.vertices])
+
+        # Find all the edges of the convex hull
+        edges = []
+        for simplex in hull.simplices:
+            for s in range(len(simplex)):
+                edge = tuple(sorted((simplex[s], simplex[(s + 1) % len(simplex)])))
+                edges.append(edge)
+
+        # Create a line through the polyhedron along the principal component
+        d = distances.distance_array(shell, shell, box=self.universe.dimensions)
+        t_values = np.linspace(-d.max()/2, d.max()/2, 100)
+        center_line = np.array([center + t*pca.components_[0,:] for t in t_values])
+
+        # Find the maximum cross-sectional area along the line through polyhedron
+        area = 0
+        for pt in center_line:
+            # Find the plane normal to the principal component
+            A, B, C, D = create_plane_from_point_and_normal(pt, pca.components_[0,:])
+
+            # Find the intersection points of the hull edges with the slicing plane
+            intersection_points = []
+            for edge in edges:
+                p1 = pos[edge[0]]
+                p2 = pos[edge[1]]
+                intersection_point = line_plane_intersection(p1, p2, A, B, C, D)
+                if intersection_point is not None:
+                    intersection_points.append(intersection_point)
+
+            # If a slicing plane exists and its area is larger than any other, save
+            if len(intersection_points) > 0:
+                intersection_points = np.array(intersection_points)
+                projected_points, rot_mat, mean_point = project_to_plane(intersection_points)
+                intersection_hull = ConvexHull(projected_points)
+
+                if intersection_hull.volume > area:
+                    area = intersection_hull.volume
+
+        return area, volume
+    
+
+    def _unwrap_shell(self, ion, r0):
+        '''
+        Unwrap the hydration shell, so all coordinated groups are on the same side of the box as ion.
+
+        Parameters
+        ----------
+        ion : MDAnalysis.Atom
+            Ion whose shell to unwrap
+        r0 : float
+            Hydration shell radius for the ion
+
+        Returns
+        -------
+        positions : np.ndarray
+            Unwrapped coordinated for the atoms in the shell
+
+        '''
+
+        dims = self.universe.dimensions
+        shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
+        
+        positions = np.zeros((len(shell), 3))
+        for a,atom in enumerate(shell):
+            dist = ion.position - atom.position
+            for d in range(3):
+                if np.abs(dist[d]) > dims[d]/2: # if distance is more than half the box
+                    if dist[d] < 0:
+                        positions[a,d] = atom.position[d] - dims[d]
+                    else:
+                        positions[a,d] = atom.position[d] + dims[d]
+                else:
+                    positions[a,d] = atom.position[d]
+
+        return positions
+
 
     def _get_spline_minima(self):
         '''
@@ -1725,56 +2044,3 @@ class UmbrellaAnalysis:
         kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
         rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
         return rotation_matrix
-
-
-
-# TEMPORARY
-# define some functions for analysis
-def unitize(v):
-    '''Create a unit vector from vector v'''
-    return v / np.linalg.norm(v)
-
-
-def get_angle(v1, v2):
-    '''Get the angle between two vectors v1 and v2'''
-    
-    v1 = unitize(v1)
-    v2 = unitize(v2)
-
-    return np.arccos(np.clip(np.dot(v1, v2), -1.0, 1.0))
-
-
-def get_distributions(solute_Na, ion, shell_OW, shell):
-    '''
-    Get the water angle and water orientation distributions for a given shell
-    
-    shell : dict, the shell structure to look at, e.g. {water : 5, ion : 0}
-    '''
-
-    df1 = solute_Na.speciation.get_shells(shell)
-    frames = np.array(df1.droplevel(1).index.to_list())
-
-    angles = []
-    orientations = []
-    for i, ts in enumerate(u.trajectory[frames]):
-
-        # calculate angles between ref-ion-OW
-        tmp_point = ion.positions[0] + np.array([0,0,1])
-        v1 = tmp_point - ion.positions[0]
-        for pos in shell_OW.positions:
-            v2 = pos - ion.positions[0]
-            ang = get_angle(v1, v2)*180/np.pi
-            angles.append(ang)
-
-        # calculate angles between avg_HW-OW-ion
-        for O in shell_OW:
-            pos = O.position
-            bonded_Hs = O.bonded_atoms
-            tmp_point = bonded_Hs.positions.mean(axis=0)
-            
-            v1 = ion.positions[0] - pos
-            v2 = pos - tmp_point
-            ang = get_angle(v1, v2)*180/np.pi
-            orientations.append(ang)
-
-    return np.array(angles), np.array(orientations)

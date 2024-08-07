@@ -1736,7 +1736,7 @@ class UmbrellaAnalysis:
         self.coordination_numbers = np.zeros(len(self.universe.trajectory[::step]))
 
         for i,ts in enumerate(self.universe.trajectory[::step]):
-            d = distances.distance_array(ion, self.waters, box=ts.dimensions)
+            d = distances.distance_array(ion, self.universe.select_atoms('not element H') - ion, box=ts.dimensions)
             self.coordination_numbers[i] = (d <= radius).sum()
 
         return self.coordination_numbers

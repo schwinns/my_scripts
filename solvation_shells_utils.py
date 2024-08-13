@@ -880,9 +880,9 @@ class EquilibriumAnalysis:
         return hist, (X,Y,Z)
     
 
-    def polyhedron_size(self, ion='cation', step=1):
+    def polyhedron_size(self, ion='cation', r0=None, njobs=1, step=1):
         '''
-        Construct a polyhedron from the waters in a hydration shell and calculate the volume of the polyhedron
+        Construct a polyhedron from the atoms in a hydration shell and calculate the volume of the polyhedron
         and the maximum cross-sectional area of the polyhedron. The cross-sections are taken along the first 
         principal component of the vertices of the polyhedron.
 
@@ -890,6 +890,11 @@ class EquilibriumAnalysis:
         ----------
         ion : str
             Whether to calculate the volumes and areas for the cations or anions, options are `cation` and `anion`
+        r0 : float
+            Hydration shell cutoff in Angstroms, default=None means will calculate using `self.initialize_Solutes()`
+        njobs : int
+            How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
+            distribute the analysis. If -1, use all available processors.
         step : int
             Trajectory step for analysis
 
@@ -900,22 +905,21 @@ class EquilibriumAnalysis:
         
         '''
 
-        from scipy.spatial import ConvexHull
-        from sklearn.decomposition import PCA
-
         if ion == 'cation':
             ions = self.cations
-            try:
-                r0 = self.solute_ci.radii['water']
-            except NameError:
-                print('Solutes not initialized. Try `initialize_Solutes()` first')
+            if r0 is None:
+                try:
+                    r0 = self.solute_ci.radii['water']
+                except NameError:
+                    print('Solutes not initialized. Try `initialize_Solutes()` first')
 
         elif ion == 'anion':
             ions = self.anions
-            try:
-                r0 = self.solute_ai.radii['water']
-            except NameError:
-                print('Solutes not initialized. Try `initialize_Solutes()` first')
+            if r0 is None:
+                try:
+                    r0 = self.solute_ai.radii['water']
+                except NameError:
+                    print('Solutes not initialized. Try `initialize_Solutes()` first')
 
         else:
             raise NameError("Options for kwarg ion are 'cation' or 'anion'")
@@ -925,72 +929,133 @@ class EquilibriumAnalysis:
         results.areas = np.zeros((len(ions), len(self.universe.trajectory[::step])))
         results.volumes = np.zeros((len(ions), len(self.universe.trajectory[::step])))
 
-        for i,ts in tqdm(enumerate(self.universe.trajectory[::step])):
-            for j,ion in enumerate(ions):
+        if njobs == 1: # run on 1 CPU
 
-                # Unwrap the shell
-                shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index}) and (type OW)')
-                pos = self._unwrap_shell(ion, r0, ts)
-                shell.positions = pos
-                pos = self._points_on_atomic_radius(shell, n_points=200)
-                center = ion.position
+            for i,ts in tqdm(enumerate(self.universe.trajectory[::step])):
+                a,v = self._polyhedron_size_per_frame(i, ions, r0=r0)
+                results.areas[:,i] = a
+                results.volumes[:,i] = v
 
-                if len(shell) < 4: # cannot create a polyhedron
-                    results.volumes[j,i] = np.nan
-                    results.areas[j,i] = np.nan
-                    continue
+        else: # run in parallel
 
-                # Create the polyhedron with a ConvexHull and save volume
-                hull = ConvexHull(pos)
-                results.volumes[j,i] = hull.volume
+            import multiprocessing
+            from multiprocessing import Pool
+            from functools import partial
+            
+            if njobs == -1:
+                n = multiprocessing.cpu_count()
+            else:
+                n = njobs
 
-                # Get the major axis (first principal component)
-                pca = PCA(n_components=3).fit(pos[hull.vertices])
+            run_per_frame = partial(self._polyhedron_size_per_frame,
+                                    ions=ions,
+                                    r0=r0)
+            frame_values = np.arange(self.universe.trajectory.n_frames, step=step)
 
-                # Find all the edges of the convex hull
-                edges = []
-                for simplex in hull.simplices:
-                    for s in range(len(simplex)):
-                        edge = tuple(sorted((simplex[s], simplex[(s + 1) % len(simplex)])))
-                        edges.append(edge)
+            with Pool(n) as worker_pool:
+                result = worker_pool.map(run_per_frame, frame_values)
 
-                # Create a line through the polyhedron along the principal component
-                d = distances.distance_array(shell, shell, box=ts.dimensions)
-                t_values = np.linspace(-d.max()/2, d.max()/2, 100)
-                center_line = np.array([center + t*pca.components_[0,:] for t in t_values])
-
-                # Find the maximum cross-sectional area along the line through polyhedron
-                area = 0
-                for pt in center_line:
-                    # Find the plane normal to the principal component
-                    A, B, C, D = create_plane_from_point_and_normal(pt, pca.components_[0,:])
-
-                    # Find the intersection points of the hull edges with the slicing plane
-                    intersection_points = []
-                    for edge in edges:
-                        p1 = pos[edge[0]]
-                        p2 = pos[edge[1]]
-                        intersection_point = line_plane_intersection(p1, p2, A, B, C, D)
-                        if intersection_point is not None:
-                            intersection_points.append(intersection_point)
-
-                    # If a slicing plane exists and its area is larger than any other, save
-                    if len(intersection_points) > 0:
-                        intersection_points = np.array(intersection_points)
-                        projected_points, rot_mat, mean_point = project_to_plane(intersection_points)
-                        intersection_hull = ConvexHull(projected_points)
-
-                        if intersection_hull.volume > area:
-                            saved_points = (pt, intersection_points, projected_points, mean_point)
-                            area = intersection_hull.volume
-                
-                results.areas[j,i] = area
-
+            result = np.asarray(result)
+            results.areas = result[:,0,:].T
+            results.volumes = result[:,1,:].T
 
         return results
+    
+
+    def _polyhedron_size_per_frame(self, frame_idx, ions, r0):
+        '''
+        Construct a polyhedron from the atoms in a hydration shell and calculate the volume of the polyhedron
+        and the maximum cross-sectional area of the polyhedron. The cross-sections are taken along the first 
+        principal component of the vertices of the polyhedron.
+
+        Parameters
+        ----------
+        frame_idx : int
+            Index of the frame
+        ions : MDAnalysis.AtomGroup
+            Ions in the simulation to calculate polyhedrons for
+        r0 : float
+            Hydration shell cutoff for the biased ion in Angstroms, default=3.15
+
+        Returns
+        -------
+        area, volume : np.ndarray
+            Volumes and maximum cross-sectional areas for the polyhedrons for each ion, shape is len(ions)
+        
+        '''
+
+        from scipy.spatial import ConvexHull
+        from sklearn.decomposition import PCA
+
+        # initialize the frame
+        self.universe.trajectory[frame_idx]
+
+        volumes = np.zeros(len(ions))
+        areas = np.zeros(len(ions))
+
+        for j,ion in enumerate(ions):
+
+            # Unwrap the shell
+            shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index}) and (type OW)')
+            pos = self._unwrap_shell(ion, r0)
+            shell.positions = pos
+            pos = self._points_on_atomic_radius(shell, n_points=200)
+            center = ion.position
+
+            if len(shell) < 4: # cannot create a polyhedron
+                volumes[j] = np.nan
+                areas[j] = np.nan
+                continue
+
+            # Create the polyhedron with a ConvexHull and save volume
+            hull = ConvexHull(pos)
+            volumes[j] = hull.volume
+
+            # Get the major axis (first principal component)
+            pca = PCA(n_components=3).fit(pos[hull.vertices])
+
+            # Find all the edges of the convex hull
+            edges = []
+            for simplex in hull.simplices:
+                for s in range(len(simplex)):
+                    edge = tuple(sorted((simplex[s], simplex[(s + 1) % len(simplex)])))
+                    edges.append(edge)
+
+            # Create a line through the polyhedron along the principal component
+            d = distances.distance_array(shell, shell, box=ions.universe.dimensions)
+            t_values = np.linspace(-d.max()/2, d.max()/2, 100)
+            center_line = np.array([center + t*pca.components_[0,:] for t in t_values])
+
+            # Find the maximum cross-sectional area along the line through polyhedron
+            area = 0
+            for pt in center_line:
+                # Find the plane normal to the principal component
+                A, B, C, D = create_plane_from_point_and_normal(pt, pca.components_[0,:])
+
+                # Find the intersection points of the hull edges with the slicing plane
+                intersection_points = []
+                for edge in edges:
+                    p1 = pos[edge[0]]
+                    p2 = pos[edge[1]]
+                    intersection_point = line_plane_intersection(p1, p2, A, B, C, D)
+                    if intersection_point is not None:
+                        intersection_points.append(intersection_point)
+
+                # If a slicing plane exists and its area is larger than any other, save
+                if len(intersection_points) > 0:
+                    intersection_points = np.array(intersection_points)
+                    projected_points, rot_mat, mean_point = project_to_plane(intersection_points)
+                    intersection_hull = ConvexHull(projected_points)
+
+                    if intersection_hull.volume > area:
+                        area = intersection_hull.volume
+            
+            areas[j] = area
+
+        return areas, volumes
 
 
-    def _unwrap_shell(self, ion, r0, ts):
+    def _unwrap_shell(self, ion, r0):
         '''
         Unwrap the hydration shell, so all coordinated waters are on the same side of the box as ion.
 
@@ -1000,8 +1065,6 @@ class EquilibriumAnalysis:
             Ion whose shell to unwrap
         r0 : float
             Hydration shell radius for the ion
-        ts : MDAnalysis.coordinates.timestep.TimeStep
-            Timestep in the trajectory, critically, should have dimensions of the box
 
         Returns
         -------
@@ -1016,11 +1079,11 @@ class EquilibriumAnalysis:
         for w,water in enumerate(shell):
             dist = ion.position - water.position
             for d in range(3):
-                if np.abs(dist[d]) > ts.dimensions[d]/2: # if distance is more than half the box
+                if np.abs(dist[d]) > ion.universe.dimensions[d]/2: # if distance is more than half the box
                     if dist[d] < 0:
-                        positions[w,d] = water.position[d] - ts.dimensions[d]
+                        positions[w,d] = water.position[d] - ion.universe.dimensions[d]
                     else:
-                        positions[w,d] = water.position[d] + ts.dimensions[d]
+                        positions[w,d] = water.position[d] + ion.universe.dimensions[d]
                 else:
                     positions[w,d] = water.position[d]
 

@@ -1757,7 +1757,8 @@ class UmbrellaAnalysis:
 
             run_per_frame = partial(self._polyhedron_size_per_frame,
                                     biased_ion=biased_ion,
-                                    r0=r0)
+                                    r0=r0,
+                                    for_visualization=False)
             frame_values = np.arange(self.universe.trajectory.n_frames)
 
             with Pool(n) as worker_pool:
@@ -2033,7 +2034,7 @@ class UmbrellaAnalysis:
         shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
         pos = self._unwrap_shell(ion, r0)
         shell.positions = pos
-        pos = self._points_on_atomic_radius(shell, n_points=1000)
+        pos = self._points_on_atomic_radius(shell, n_points=100)
         center = ion.position
 
         if len(shell) < 4: # cannot create a polyhedron
@@ -2082,6 +2083,8 @@ class UmbrellaAnalysis:
                 if intersection_hull.volume > area:
                     saved_points = (pt, intersection_points, projected_points, mean_point)
                     area = intersection_hull.volume
+
+        print(f'\tFinished frame {frame_idx} / {biased_ion.universe.trajectory.n_frames}')
 
         if for_visualization:
             return area, volume, saved_points

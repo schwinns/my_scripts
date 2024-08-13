@@ -1707,7 +1707,7 @@ class UmbrellaAnalysis:
         return self.angular_distributions
     
 
-    def polyhedron_size(self, biased_ion, r0=3.15, njobs=1):
+    def polyhedron_size(self, biased_ion, r0=3.15, njobs=1, step=1):
         '''
         Calculate the maximum cross-sectional areas and volumes as time series for coordination shells.
         Construct a polyhedron from the atoms in a hydration shell and calculate the volume of the polyhedron
@@ -1734,12 +1734,12 @@ class UmbrellaAnalysis:
 
         # prepare the Results object
         results = Results()
-        results.areas = np.zeros(len(self.universe.trajectory))
-        results.volumes = np.zeros(len(self.universe.trajectory))
+        results.areas = np.zeros(len(self.universe.trajectory[::step]))
+        results.volumes = np.zeros(len(self.universe.trajectory[::step]))
 
         if njobs == 1: # run on 1 CPU
 
-            for i,ts in tqdm(enumerate(self.universe.trajectory)):
+            for i,ts in tqdm(enumerate(self.universe.trajectory[::step])):
                 a,v = self._polyhedron_size_per_frame(i, biased_ion, r0=r0)
                 results.areas[i] = a
                 results.volumes[i] = v
@@ -1758,7 +1758,7 @@ class UmbrellaAnalysis:
             run_per_frame = partial(self._polyhedron_size_per_frame,
                                     biased_ion=biased_ion,
                                     r0=r0)
-            frame_values = np.arange(self.universe.trajectory.n_frames)
+            frame_values = np.arange(self.universe.trajectory.n_frames, step=step)
 
             with Pool(n) as worker_pool:
                 result = worker_pool.map(run_per_frame, frame_values)
@@ -1809,9 +1809,9 @@ class UmbrellaAnalysis:
         return self.universe
     
 
-    def get_coordination_numbers(self, biased_ion, radius, step=1):
+    def get_coordination_numbers(self, biased_ion, radius, njobs=1):
         '''
-        Calculate the discrete water coordination number as a function of time for biased ion.
+        Calculate the discrete total coordination number as a function of time for biased ion.
         
         Parameters
         ----------
@@ -1819,8 +1819,9 @@ class UmbrellaAnalysis:
             Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
         radius : float
             Hydration shell cutoff for the ion (Angstroms)
-        step : int
-            Trajectory step for which to calculate coordination numbers
+        njobs : int
+            How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
+            distribute the analysis. If -1, use all available processors.
         
         Returns
         -------
@@ -1838,12 +1839,34 @@ class UmbrellaAnalysis:
         else:
             ion = biased_ion
 
-        # initialize coordination number as a function of time
-        self.coordination_numbers = np.zeros(len(self.universe.trajectory[::step]))
+        if njobs == 1: # run on 1 CPU
 
-        for i,ts in enumerate(self.universe.trajectory[::step]):
-            d = distances.distance_array(ion, self.universe.select_atoms('not element H') - ion, box=ts.dimensions)
-            self.coordination_numbers[i] = (d <= radius).sum()
+            # initialize coordination number as a function of time
+            self.coordination_numbers = np.zeros(len(self.universe.trajectory))
+
+            for i,ts in enumerate(self.universe.trajectory):
+                self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius)
+
+        else: # run in parallel
+
+            import multiprocessing
+            from multiprocessing import Pool
+            from functools import partial
+            
+            if njobs == -1:
+                n = multiprocessing.cpu_count()
+            else:
+                n = njobs
+
+            run_per_frame = partial(self._coordination_number_per_frame,
+                                    biased_ion=biased_ion,
+                                    radius=radius)
+            frame_values = np.arange(self.universe.trajectory.n_frames)
+
+            with Pool(n) as worker_pool:
+                result = worker_pool.map(run_per_frame, frame_values)
+
+            self.coordination_numbers = np.asarray(result)
 
         return self.coordination_numbers
 
@@ -1991,6 +2014,34 @@ class UmbrellaAnalysis:
         f = UnivariateSpline(bins, fes, k=4, s=0)
         
         return f
+    
+
+    def _coordination_number_per_frame(self, frame_idx, biased_ion, radius):
+        '''
+        Calculate the discrete total coordination number as a function of time for biased ion.
+
+        Parameters
+        ----------
+        biased_ion : MDAnalysis.AtomGroup
+            MDAnalysis AtomGroup of the biased ion
+        radius : float
+            Hydration shell cutoff for the ion (Angstroms)
+
+        Returns
+        -------
+        coordination_number : int
+            Discrete coordination number around the biased ion
+        
+        '''
+
+        # initialize the frame
+        self.universe.trajectory[frame_idx]
+
+        # calculate distances and compare to hydration shell cutoff
+        d = distances.distance_array(biased_ion, self.universe.select_atoms('not element H') - biased_ion, box=self.universe.dimensions)
+        coordination_number = (d <= radius).sum()
+
+        return coordination_number
 
 
     def _polyhedron_size_per_frame(self, frame_idx, biased_ion, r0=3.15, for_visualization=False):
@@ -2033,7 +2084,7 @@ class UmbrellaAnalysis:
         shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
         pos = self._unwrap_shell(ion, r0)
         shell.positions = pos
-        pos = self._points_on_atomic_radius(shell, n_points=1000)
+        pos = self._points_on_atomic_radius(shell, n_points=200)
         center = ion.position
 
         if len(shell) < 4: # cannot create a polyhedron
@@ -2082,6 +2133,8 @@ class UmbrellaAnalysis:
                 if intersection_hull.volume > area:
                     saved_points = (pt, intersection_points, projected_points, mean_point)
                     area = intersection_hull.volume
+
+        print(f'\tFinished frame {frame_idx} / {self.universe.trajectory.n_frames}')
 
         if for_visualization:
             return area, volume, saved_points

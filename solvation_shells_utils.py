@@ -295,6 +295,118 @@ def get_dehydration_energy(bins, fes, cn1, cn2):
     return dG
 
 
+class vdW_radii:
+    def __init__(self):
+        self.dict = {
+            "H": 1.20,  # Hydrogen
+            "He": 1.40,  # Helium
+            "Li": 1.82,  # Lithium
+            "Be": 1.53,  # Beryllium
+            "B": 1.92,  # Boron
+            "C": 1.70,  # Carbon
+            "N": 1.55,  # Nitrogen
+            "O": 1.52,  # Oxygen
+            "F": 1.47,  # Fluorine
+            "Ne": 1.54,  # Neon
+            "Na": 2.27,  # Sodium
+            "Mg": 1.73,  # Magnesium
+            "Al": 1.84,  # Aluminum
+            "Si": 2.10,  # Silicon
+            "P": 1.80,  # Phosphorus
+            "S": 1.80,  # Sulfur
+            "Cl": 1.75,  # Chlorine
+            "Ar": 1.88,  # Argon
+            "K": 2.75,  # Potassium
+            "Ca": 2.31,  # Calcium
+            "Sc": 2.11,  # Scandium
+            "Ti": 2.00,  # Titanium
+            "V": 2.00,  # Vanadium
+            "Cr": 2.00,  # Chromium
+            "Mn": 2.00,  # Manganese
+            "Fe": 2.00,  # Iron
+            "Co": 2.00,  # Cobalt
+            "Ni": 1.63,  # Nickel
+            "Cu": 1.40,  # Copper
+            "Zn": 1.39,  # Zinc
+            "Ga": 1.87,  # Gallium
+            "Ge": 2.11,  # Germanium
+            "As": 1.85,  # Arsenic
+            "Se": 1.90,  # Selenium
+            "Br": 1.85,  # Bromine
+            "Kr": 2.02,  # Krypton
+            "Rb": 3.03,  # Rubidium
+            "Sr": 2.49,  # Strontium
+            "Y": 2.30,  # Yttrium
+            "Zr": 2.15,  # Zirconium
+            "Nb": 2.00,  # Niobium
+            "Mo": 2.00,  # Molybdenum
+            "Tc": 2.00,  # Technetium
+            "Ru": 2.00,  # Ruthenium
+            "Rh": 2.00,  # Rhodium
+            "Pd": 1.63,  # Palladium
+            "Ag": 1.72,  # Silver
+            "Cd": 1.58,  # Cadmium
+            "In": 1.93,  # Indium
+            "Sn": 2.17,  # Tin
+            "Sb": 2.06,  # Antimony
+            "Te": 2.06,  # Tellurium
+            "I": 1.98,  # Iodine
+            "Xe": 2.16,  # Xenon
+            "Cs": 3.43,  # Cesium
+            "Ba": 2.68,  # Barium
+            "La": 2.50,  # Lanthanum
+            "Ce": 2.48,  # Cerium
+            "Pr": 2.47,  # Praseodymium
+            "Nd": 2.45,  # Neodymium
+            "Pm": 2.43,  # Promethium
+            "Sm": 2.42,  # Samarium
+            "Eu": 2.40,  # Europium
+            "Gd": 2.38,  # Gadolinium
+            "Tb": 2.37,  # Terbium
+            "Dy": 2.35,  # Dysprosium
+            "Ho": 2.33,  # Holmium
+            "Er": 2.32,  # Erbium
+            "Tm": 2.30,  # Thulium
+            "Yb": 2.28,  # Ytterbium
+            "Lu": 2.27,  # Lutetium
+            "Hf": 2.25,  # Hafnium
+            "Ta": 2.20,  # Tantalum
+            "W": 2.10,  # Tungsten
+            "Re": 2.05,  # Rhenium
+            "Os": 2.00,  # Osmium
+            "Ir": 2.00,  # Iridium
+            "Pt": 1.75,  # Platinum
+            "Au": 1.66,  # Gold
+            "Hg": 1.55,  # Mercury
+            "Tl": 1.96,  # Thallium
+            "Pb": 2.02,  # Lead
+            "Bi": 2.07,  # Bismuth
+            "Po": 1.97,  # Polonium
+            "At": 2.02,  # Astatine
+            "Rn": 2.20,  # Radon
+            "Fr": 3.48,  # Francium
+            "Ra": 2.83,  # Radium
+            "Ac": 2.60,  # Actinium
+            "Th": 2.40,  # Thorium
+            "Pa": 2.00,  # Protactinium
+            "U": 1.86,  # Uranium
+            "Np": 2.00,  # Neptunium
+            "Pu": 2.00,  # Plutonium
+            "Am": 2.00,  # Americium
+            "Cm": 2.00,  # Curium
+            "Bk": 2.00,  # Berkelium
+            "Cf": 2.00,  # Californium
+            "Es": 2.00,  # Einsteinium
+            "Fm": 2.00,  # Fermium
+            "Md": 2.00,  # Mendelevium
+            "No": 2.00,  # Nobelium
+            "Lr": 2.00   # Lawrencium
+        }
+
+    def get_dict(self):
+        return self.dict
+
+
 class EquilibriumAnalysis:
 
     def __init__(self, top, traj, water='type OW', cation='resname NA', anion='resname CL'):
@@ -329,6 +441,8 @@ class EquilibriumAnalysis:
             raise ValueError(f'No cations found with selection {cation}')
         if len(self.anions) == 0:
             raise ValueError(f'No anions found with selection {anion}')
+
+        self.vdW_radii = vdW_radii().get_dict()
 
         
     def __repr__(self):
@@ -817,6 +931,8 @@ class EquilibriumAnalysis:
                 # Unwrap the shell
                 shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index}) and (type OW)')
                 pos = self._unwrap_shell(ion, r0, ts)
+                shell.positions = pos
+                pos = self._points_on_atomic_radius(shell, n_points=200)
                 center = ion.position
 
                 if len(shell) < 4: # cannot create a polyhedron
@@ -909,6 +1025,39 @@ class EquilibriumAnalysis:
                     positions[w,d] = water.position[d]
 
         return positions
+    
+
+    def _points_on_atomic_radius(self, shell, n_points=100):
+        '''
+        Generate points on the "surface" of the atoms, so we have points that encompass the volume of the atoms.
+
+        Parameters
+        ----------
+        shell : MDAnalysis.AtomGroup
+            Hydration shell with all atoms to generate points
+
+        Returns
+        -------
+        positions : np.ndarray
+            Points on the "surface" of the atoms
+        '''
+
+        positions = np.zeros((len(shell), n_points, 3))
+
+        for a,atom in enumerate(shell):
+            radius = self.vdW_radii[atom.element]
+            
+            # randomly sample theta and phi angles
+            rng = np.random.default_rng()
+            theta = np.arccos(rng.uniform(-1,1, n_points))
+            phi = rng.uniform(0,2*np.pi, n_points)
+
+            # convert to Cartesian coordinates
+            positions[a,:,0] = radius * np.sin(theta) * np.cos(phi) + atom.position[0]
+            positions[a,:,1] = radius * np.sin(theta) * np.sin(phi) + atom.position[1]
+            positions[a,:,2] = radius * np.cos(theta) + atom.position[2]
+
+        return np.reshape(positions, (len(shell)*n_points, 3))
 
 
 class MetaDAnalysis:
@@ -1210,111 +1359,7 @@ class UmbrellaAnalysis:
             filename = f'{COLVAR_file}{i}'
             self.colvars.append(UmbrellaSim(filename, start=start, stop=stop, by=by))
 
-        self.vdW_radii = {
-            "H": 1.20,  # Hydrogen
-            "He": 1.40,  # Helium
-            "Li": 1.82,  # Lithium
-            "Be": 1.53,  # Beryllium
-            "B": 1.92,  # Boron
-            "C": 1.70,  # Carbon
-            "N": 1.55,  # Nitrogen
-            "O": 1.52,  # Oxygen
-            "F": 1.47,  # Fluorine
-            "Ne": 1.54,  # Neon
-            "Na": 2.27,  # Sodium
-            "Mg": 1.73,  # Magnesium
-            "Al": 1.84,  # Aluminum
-            "Si": 2.10,  # Silicon
-            "P": 1.80,  # Phosphorus
-            "S": 1.80,  # Sulfur
-            "Cl": 1.75,  # Chlorine
-            "Ar": 1.88,  # Argon
-            "K": 2.75,  # Potassium
-            "Ca": 2.31,  # Calcium
-            "Sc": 2.11,  # Scandium
-            "Ti": 2.00,  # Titanium
-            "V": 2.00,  # Vanadium
-            "Cr": 2.00,  # Chromium
-            "Mn": 2.00,  # Manganese
-            "Fe": 2.00,  # Iron
-            "Co": 2.00,  # Cobalt
-            "Ni": 1.63,  # Nickel
-            "Cu": 1.40,  # Copper
-            "Zn": 1.39,  # Zinc
-            "Ga": 1.87,  # Gallium
-            "Ge": 2.11,  # Germanium
-            "As": 1.85,  # Arsenic
-            "Se": 1.90,  # Selenium
-            "Br": 1.85,  # Bromine
-            "Kr": 2.02,  # Krypton
-            "Rb": 3.03,  # Rubidium
-            "Sr": 2.49,  # Strontium
-            "Y": 2.30,  # Yttrium
-            "Zr": 2.15,  # Zirconium
-            "Nb": 2.00,  # Niobium
-            "Mo": 2.00,  # Molybdenum
-            "Tc": 2.00,  # Technetium
-            "Ru": 2.00,  # Ruthenium
-            "Rh": 2.00,  # Rhodium
-            "Pd": 1.63,  # Palladium
-            "Ag": 1.72,  # Silver
-            "Cd": 1.58,  # Cadmium
-            "In": 1.93,  # Indium
-            "Sn": 2.17,  # Tin
-            "Sb": 2.06,  # Antimony
-            "Te": 2.06,  # Tellurium
-            "I": 1.98,  # Iodine
-            "Xe": 2.16,  # Xenon
-            "Cs": 3.43,  # Cesium
-            "Ba": 2.68,  # Barium
-            "La": 2.50,  # Lanthanum
-            "Ce": 2.48,  # Cerium
-            "Pr": 2.47,  # Praseodymium
-            "Nd": 2.45,  # Neodymium
-            "Pm": 2.43,  # Promethium
-            "Sm": 2.42,  # Samarium
-            "Eu": 2.40,  # Europium
-            "Gd": 2.38,  # Gadolinium
-            "Tb": 2.37,  # Terbium
-            "Dy": 2.35,  # Dysprosium
-            "Ho": 2.33,  # Holmium
-            "Er": 2.32,  # Erbium
-            "Tm": 2.30,  # Thulium
-            "Yb": 2.28,  # Ytterbium
-            "Lu": 2.27,  # Lutetium
-            "Hf": 2.25,  # Hafnium
-            "Ta": 2.20,  # Tantalum
-            "W": 2.10,  # Tungsten
-            "Re": 2.05,  # Rhenium
-            "Os": 2.00,  # Osmium
-            "Ir": 2.00,  # Iridium
-            "Pt": 1.75,  # Platinum
-            "Au": 1.66,  # Gold
-            "Hg": 1.55,  # Mercury
-            "Tl": 1.96,  # Thallium
-            "Pb": 2.02,  # Lead
-            "Bi": 2.07,  # Bismuth
-            "Po": 1.97,  # Polonium
-            "At": 2.02,  # Astatine
-            "Rn": 2.20,  # Radon
-            "Fr": 3.48,  # Francium
-            "Ra": 2.83,  # Radium
-            "Ac": 2.60,  # Actinium
-            "Th": 2.40,  # Thorium
-            "Pa": 2.00,  # Protactinium
-            "U": 1.86,  # Uranium
-            "Np": 2.00,  # Neptunium
-            "Pu": 2.00,  # Plutonium
-            "Am": 2.00,  # Americium
-            "Cm": 2.00,  # Curium
-            "Bk": 2.00,  # Berkelium
-            "Cf": 2.00,  # Californium
-            "Es": 2.00,  # Einsteinium
-            "Fm": 2.00,  # Fermium
-            "Md": 2.00,  # Mendelevium
-            "No": 2.00,  # Nobelium
-            "Lr": 2.00   # Lawrencium
-        }
+        self.vdW_radii = vdW_radii().get_dict() # I am sure there is a better way to do this... but I am not taking the time now
 
     
     def __repr__(self):
@@ -2086,7 +2131,6 @@ class UmbrellaAnalysis:
         pos = self._unwrap_shell(ion, r0)
         shell.positions = pos
         pos = self._points_on_atomic_radius(shell, n_points=200)
-        pos = self._points_on_atomic_radius(shell, n_points=100)
         center = ion.position
 
         if len(shell) < 4: # cannot create a polyhedron
@@ -2182,7 +2226,7 @@ class UmbrellaAnalysis:
         return positions
 
 
-    def _points_on_atomic_radius(self, shell, n_points=1000):
+    def _points_on_atomic_radius(self, shell, n_points=100):
         '''
         Generate points on the "surface" of the atoms, so we have points that encompass the volume of the atoms.
 

@@ -989,7 +989,7 @@ class EquilibriumAnalysis:
 
         return results
 
-    
+
     def _unwrap_shell(self, ion, r0, ts):
         '''
         Unwrap the hydration shell, so all coordinated waters are on the same side of the box as ion.
@@ -2179,10 +2179,6 @@ class UmbrellaAnalysis:
                 if intersection_hull.volume > area:
                     saved_points = (pt, intersection_points, projected_points, mean_point)
                     area = intersection_hull.volume
-
-        print(f'\tFinished frame {frame_idx} / {self.universe.trajectory.n_frames}')
-
-        print(f'\tFinished frame {frame_idx} / {biased_ion.universe.trajectory.n_frames}')
 
         if for_visualization:
             return area, volume, saved_points

@@ -842,6 +842,8 @@ class PolymAnalysis():
     def insert_cations_in_membrane(self, ion_name='NA', ion_charge=1, extra_inserted=0, output='PA_ions.gro'):
         '''Add ions to the membrane by merging universe with ion universe'''
 
+        from MDAnalysis.analysis import distances
+
         # locate COOH/COO- oxygens
         c_group = self.universe.select_atoms('type c and not bonded type n')
         deprot_o = []
@@ -862,11 +864,16 @@ class PolymAnalysis():
         else:
             n_ions = len(deprot_o)
 
+        print(f'Polymer charge is {polymer_charge}')
+
         n_ions += extra_inserted # add the extra inserted ions to total added ions count
         counterion_charge = n_ions*ion_charge # calculate charge from added ions
         excess_charge = counterion_charge + polymer_charge # calculate excess charge from polymer and added ions
 
+        print(f'Adding {n_ions} cations, which results in {excess_charge} excess charge in the system')
+
         # select which O's to place ions near
+        print('WARNING: currently the only insertion algorithm is randomly chosen R-COOH/COO- groups')
         rng = np.random.default_rng()
         prot_idx = rng.integers(0, len(prot_o), size=extra_inserted) # get random indices of COOH oxygens
         tmp = np.array(prot_o)
@@ -878,7 +885,16 @@ class PolymAnalysis():
             my_id = O.index
             my_waters = self.universe.select_atoms(f'resname SOL and sphzone 5 index {my_id}').residues # select waters within 5 Angstroms
             if len(my_waters) > 0:
-                ion_pos.append(my_waters.atoms.center_of_mass()) # place ion at COM of the waters
+                # my_c = O.bonded_atoms[0]
+                # kick_vec = O.position - my_c.position
+                # kick_vec = kick_vec / np.linalg.norm(kick_vec) # kick vector points along the carbon-oxygen bond
+                # kick_strength = np.random.uniform(2,3) # kick is between 2 and 3 Angstroms
+                # pos = my_waters.atoms.center_of_mass() + kick_vec*kick_strength # place ion at the waters COM, kicked out by a random amount
+                # pos = O.position + kick_vec*kick_strength # place ion at the oxygen position kicked out by a random amount
+                d = distances.distance_array(mda.AtomGroup([O]), my_waters.atoms)[0,:]
+                pos = my_waters.atoms[d.argmax()].residue.atoms.center_of_mass() # place ion at the COM of the farthest water in the zone
+                print(f'Distance between O and ion: {distances.distance_array(pos,O.position, box=self.universe.dimensions)[0,0]:.4f}')
+                ion_pos.append(pos) 
                 self.atoms = self.atoms.subtract(my_waters.atoms) # remove the waters to be replaced
 
         # reassign residue numbers after deleted waters
@@ -1225,7 +1241,7 @@ class PolymAnalysis():
         plt.close()
 
 
-    def rdf(self, atom_group1, atom_group2, range=(0,15)):
+    def rdf(self, atom_group1, atom_group2, range=(0,15), output='rdf.png', **kwargs):
         '''Calculate the RDF from atom_group1 to atom_group2 using MDAnalysis InterRDF'''
 
         from MDAnalysis.analysis.rdf import InterRDF
@@ -1241,14 +1257,14 @@ class PolymAnalysis():
             g2 = atom_group2
 
         rdf = InterRDF(g1, g2, range=range, verbose=True)
-        rdf.run()
+        rdf.run(**kwargs)
         self.rdf_results = rdf.results
 
         fig, ax = plt.subplots(1,1, figsize=(8,8))
         plt.plot(rdf.results.bins, rdf.results.rdf)
         plt.xlabel('r (A)')
         plt.ylabel('g(r)')
-        plt.savefig('rdf.png')
+        plt.savefig(output)
         plt.show()
         plt.close()
 

@@ -54,8 +54,8 @@ def generate_tpr(top, coord, mdp='min.mdp', tpr='out.tpr', gmx='gmx'):
 if __name__ == '__main__':
 
     # input desired concentration in water reservoir and names/charges of ions, also number of extra ions to insert in membrane
-    cation = 'NA'
-    anion = 'CL'
+    cation = 'Na' # should be the atom names as in ions.itp, i.e. should use lower case letters for second letters
+    anion = 'Cl'
     cation_charge = 1
     anion_charge = -1
     extra_added = 65 # 65 is the number for 50% deprotonated, adding for statistics and comparability even though fully protonated
@@ -93,7 +93,7 @@ if __name__ == '__main__':
     print(f'Need {n_salt} salt molecules to reach {C} M')
 
     # add cations and update topology for cations near de/protonated groups
-    n_cations, new_gro, excess_charge = gro.insert_cations_in_membrane(ion_name=cation, ion_charge=cation_charge, 
+    n_cations, new_gro, excess_charge = gro.insert_cations_in_membrane(ion_name=cation, ion_charge=cation_charge, tol=1.5,
                                                                        extra_inserted=extra_added, output='PA_ions.gro')
     new_top = update_topology(gro=new_gro, top=ion_top, n_ions=n_cations, ion_name=cation)
     new_tpr = generate_tpr(top=new_top, coord=new_gro, mdp='min.mdp', tpr='PA_ions.tpr', gmx='gmx')
@@ -130,7 +130,7 @@ if __name__ == '__main__':
         
     total_charge = excess_charge + n_cations*cation_charge + n_anions*anion_charge
     print(f'Adding {n_cations} cations and {n_anions} anions for a total charge of {total_charge}')
-    gro.insert_ions(n_anions=n_anions, anion_name=anion, anion_charge=anion_charge,
-                    n_cations=n_cations, cation_name=cation, cation_charge=cation_charge, 
+    gro.insert_ions(n_anions=n_anions, anion_name=anion.upper(), anion_charge=anion_charge,
+                    n_cations=n_cations, cation_name=cation.upper(), cation_charge=cation_charge, 
                     top=new_top, output=new_gro, water_sel=18)
     new_tpr = generate_tpr(top=new_top, coord=new_gro, mdp='min.mdp', tpr='PA_ions.tpr', gmx='gmx')

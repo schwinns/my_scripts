@@ -839,7 +839,7 @@ class PolymAnalysis():
         self.__init__(output)
 
 
-    def insert_cations_in_membrane(self, ion_name='NA', ion_charge=1, extra_inserted=0, tol=2, output='PA_ions.gro'):
+    def insert_cations_in_membrane(self, ion_name='Na', ion_charge=1, extra_inserted=0, tol=2, output='PA_ions.gro'):
         '''Add ions to the membrane by merging universe with ion universe'''
 
         from MDAnalysis.analysis import distances
@@ -941,7 +941,7 @@ class PolymAnalysis():
         
         ion_u.add_TopologyAttr('name', [f'{ion_name}']*n_ions)
         ion_u.add_TopologyAttr('type', [f'{ion_name}']*n_ions)
-        ion_u.add_TopologyAttr('resname', [f'{ion_name}']*n_ions)
+        ion_u.add_TopologyAttr('resname', [f'{ion_name.upper()}']*n_ions)
         ion_u.add_TopologyAttr('resid', list(np.arange(n_residues+1, n_residues+n_ions+1)))
 
         ion_u.atoms.positions = np.array(ion_pos[:n_ions])

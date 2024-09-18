@@ -1507,6 +1507,7 @@ class UmbrellaAnalysis:
         print('Saving results...')
         self.umbrella_centers = CN0_k
         self._u_kln = u_kln
+        self.u_kn = u_kn
         self._N_k = N_k
         self._fes = fes                     # underlying pymbar.FES object
         self._results = results             # underlying results object
@@ -1518,8 +1519,87 @@ class UmbrellaAnalysis:
             np.savetxt(filename, np.vstack([self.bin_centers, self.fes, self.error]).T, header='coordination number, free energy (kJ/mol), error (kJ/mol)')
 
         return self.bin_centers, self.fes
-
     
+
+    def calculate_discrete_FE(self, cn_range, biased_ion, radius, n_bootstraps=0, filename=None, **kwargs):
+        '''
+        Calculate the free energies associated with the discrete coordination number states from the continuous coordination number simulations
+
+        Parameters
+        ----------
+        cn_range : array-like
+            The range of discrete coordination numbers to calculate the free energies
+        biased_ion : str, MDAnalysis.AtomGroup
+            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
+        radius : float
+            Hydration shell cutoff for the ion (Angstroms)
+
+        Returns
+        -------
+        results : MDAnalysis Results class with attributes `coordination_number`, `free_energy`, and `error`
+            Free energies for the discrete coordination numbers. If `n_bootstraps` is 0, all errors will be 0.
+
+        '''
+
+        if self._fes is None:
+            raise ValueError('Continuous coordination number free energy surface not found. Try `calculate_FES()` first')
+        
+        if self.universe is None:
+            raise ValueError('No underlying MDAnalysis.Universe. Try `create_Universe()` first')
+        
+        # make biased_ion into MDAnalysis AtomGroup
+        if isinstance(biased_ion, str):
+            ion = self.universe.select_atoms(biased_ion)
+        else:
+            ion = biased_ion
+
+        # prepare the Results object
+        results = Results()
+        results.coordination_number = np.arange(cn_range[0], cn_range[1])
+        results.free_energy = np.zeros((cn_range[1] - cn_range[0]))
+        results.error = np.zeros((cn_range[1] - cn_range[0]))
+    
+        # determine indices to remove to ensure COLVAR time and Universe time match
+        n_sims = len(self.colvars)
+        total_frames = self.universe.trajectory.n_frames
+        umb_frames = self.colvars[0].time.shape[0]
+        to_remove = np.arange(umb_frames, total_frames+1, umb_frames+1)
+
+        cn = self.get_coordination_numbers(ion, radius, **kwargs)
+        cn = np.delete(cn, to_remove)
+
+        # get the discrete bins
+        bin_edges = np.linspace(cn_range[0], cn_range[1], (cn_range[1] - cn_range[0]) + 2)
+        bins = np.arange(cn_range[0], cn_range[1]+1)
+
+        if n_bootstraps > 0:
+            # if calculating error, get uncorrelated discrete coordination numbers
+            N_k = self._N_k
+            cn_kn = cn.reshape((n_sims, umb_frames))
+            for k in range(n_sims):
+                idx = self.uncorrelated_indices[k]
+                cn_kn[k, 0:N_k[k]] = cn_kn[k, idx]
+
+            cn = pymbar.utils.kn_to_n(cn_kn, N_k=N_k)
+
+            self._fes.generate_fes(self.u_kn, cn, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges}, n_bootstraps=n_bootstraps)
+            res = self._fes.get_fes(bins, reference_point='from-lowest', uncertainty_method='bootstrap')
+
+        else:
+            # do not calculate error, since unsure what histogram error means for this case
+            self._fes.generate_fes(self.u_kn, cn, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges})
+            res = self._fes.get_fes(bins, reference_point='from-lowest', uncertainty_method=None)
+
+        # convert to kJ/mol and save in Results object
+        results.free_energy = res['f_i']*self.kT
+        results.error = res['df_i']*self.kT
+
+        if filename is not None:
+            np.savetxt(filename, np.vstack([results.coordination_number, results.free_energy, results.error]).T, header='coordination number, free energy (kJ/mol), error (kJ/mol)')
+
+        return results
+
+
     def show_overlap(self):
         '''
         Compute the overlap matrix and plot as a heatmap
@@ -1832,7 +1912,7 @@ class UmbrellaAnalysis:
 
         Returns
         -------
-        area, volume : float
+        results : MDAnalysis Results class with attributes `volumes` and `areas`
             Volume and maximum cross-sectional area for the polyhedron
         
         '''
@@ -1950,6 +2030,8 @@ class UmbrellaAnalysis:
 
         if njobs == 1: # run on 1 CPU
 
+            print(f'\nCalculating the discrete coordination numbers...')
+
             # initialize coordination number as a function of time
             self.coordination_numbers = np.zeros(len(self.universe.trajectory))
 
@@ -1966,6 +2048,8 @@ class UmbrellaAnalysis:
                 n = multiprocessing.cpu_count()
             else:
                 n = njobs
+
+            print(f'\nCalculating the discrete coordination numbers using {n} CPUs...')
 
             run_per_frame = partial(self._coordination_number_per_frame,
                                     biased_ion=biased_ion,
@@ -2013,6 +2097,7 @@ class UmbrellaAnalysis:
         d_kn = np.zeros([K, N_max])                 # d_kn[k,n] is the coordination number for snapshot n from umbrella simulation k
         u_kn = np.zeros([K, N_max])                 # u_kn[k,n] is the reduced potential energy without umbrella restraints of snapshot n of umbrella simulation k
         self.uncorrelated_samples = []              # Uncorrelated samples of different simulations
+        self.uncorrelated_indices = []
         ion_restraint = (self.colvars[0].data.shape[1] == 9) # determine if there is an ion coordination restraint
 
         # Step 1b: Read in and subsample the timeseries
@@ -2037,6 +2122,7 @@ class UmbrellaAnalysis:
             d_kn[k, 0:N_k[k]] = d_kn[k, indices]
             if error:
                 self.uncorrelated_samples.append(d_kn[k, indices])
+                self.uncorrelated_indices.append(indices)
 
         N_max = np.max(N_k) # shorten the array size
         u_kln = np.zeros([K, K, N_max]) # u_kln[k,n] is the reduced potential energy of snapshot n from umbrella simulation k

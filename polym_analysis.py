@@ -839,7 +839,7 @@ class PolymAnalysis():
         self.__init__(output)
 
 
-    def insert_cations_in_membrane(self, ion_name='NA', ion_charge=1, extra_inserted=0, output='PA_ions.gro'):
+    def insert_cations_in_membrane(self, ion_name='Na', ion_charge=1, extra_inserted=0, tol=2, output='PA_ions.gro'):
         '''Add ions to the membrane by merging universe with ion universe'''
 
         from MDAnalysis.analysis import distances
@@ -873,9 +873,17 @@ class PolymAnalysis():
         print(f'Adding {n_ions} cations, which results in {excess_charge} excess charge in the system')
 
         # select which O's to place ions near
-        print('WARNING: currently the only insertion algorithm is randomly chosen R-COOH/COO- groups')
-        rng = np.random.default_rng()
-        prot_idx = rng.integers(0, len(prot_o), size=extra_inserted) # get random indices of COOH oxygens
+        print('WARNING: currently the only insertion algorithm is R-COOH groups with at least 2 water within 5 Angstroms')
+
+        prot_idx = []
+        for i,O in enumerate(prot_o):
+            my_waters = self.universe.select_atoms(f'(type OW) and (sphzone 5 index {O.index})')
+            if len(my_waters) > 1:
+                prot_idx.append(i)
+
+        if len(prot_idx) < extra_inserted:
+            raise TypeError('Not enough R-COOH groups with waters')
+
         tmp = np.array(prot_o)
         o_group = mda.AtomGroup(deprot_o + tmp[prot_idx].tolist()) # select all deprotonated groups and extra_inserted random protonated groups
 
@@ -885,15 +893,35 @@ class PolymAnalysis():
             my_id = O.index
             my_waters = self.universe.select_atoms(f'resname SOL and sphzone 5 index {my_id}').residues # select waters within 5 Angstroms
             if len(my_waters) > 0:
-                # my_c = O.bonded_atoms[0]
-                # kick_vec = O.position - my_c.position
-                # kick_vec = kick_vec / np.linalg.norm(kick_vec) # kick vector points along the carbon-oxygen bond
-                # kick_strength = np.random.uniform(2,3) # kick is between 2 and 3 Angstroms
-                # pos = my_waters.atoms.center_of_mass() + kick_vec*kick_strength # place ion at the waters COM, kicked out by a random amount
-                # pos = O.position + kick_vec*kick_strength # place ion at the oxygen position kicked out by a random amount
-                d = distances.distance_array(mda.AtomGroup([O]), my_waters.atoms)[0,:]
-                pos = my_waters.atoms[d.argmax()].residue.atoms.center_of_mass() # place ion at the COM of the farthest water in the zone
-                print(f'Distance between O and ion: {distances.distance_array(pos,O.position, box=self.universe.dimensions)[0,0]:.4f}')
+                pos = my_waters.atoms.center_of_mass() # place ion at the COM of the waters in the zone
+                
+                # randomly kick the ion around until it is at least 2 Angstroms away from all other atoms
+                i = 0
+                too_close = self.universe.select_atoms(f'point {pos[0]} {pos[1]} {pos[2]} {tol}') - my_waters.atoms
+                n_close = len(too_close)
+                while n_close > 0:
+                    kick_vec = np.random.uniform(-1,1, size=3) # random direction for kick
+                    kick_vec = kick_vec / np.linalg.norm(kick_vec) 
+                    kick_strength = np.random.uniform(0,0.1) # kick is between 0 and 0.1 Angstroms
+
+                    pos += kick_strength*kick_vec
+                    too_close = self.universe.select_atoms(f'point {pos[0]} {pos[1]} {pos[2]} {tol}') - my_waters.atoms
+
+                    if len(ion_pos) == 0: # if this is the first ion to be added, other ions do not matter
+                        n_close = len(too_close)
+                    else: # otherwise, make sure we do not place an ion on top of a previously inserted ion
+                        dists = distances.distance_array(pos, np.array(ion_pos), box=self.universe.dimensions)
+                        n_close = len(too_close) + (dists < 2).sum()
+                    
+                    i += 1
+                    if i == 10_000:
+                        print(f'failed on {O} with {n_close} atoms too close')
+                        [print(f'\t{a}') for a in too_close]
+                        exit()
+
+                
+                # print(f'Distance between O and ion: {distances.distance_array(pos,O.position, box=self.universe.dimensions)[0,0]:.4f}')
+                print(f'Inserted ion near {O} after {i} kicks at position {pos}')
                 ion_pos.append(pos) 
                 self.atoms = self.atoms.subtract(my_waters.atoms) # remove the waters to be replaced
 
@@ -913,7 +941,7 @@ class PolymAnalysis():
         
         ion_u.add_TopologyAttr('name', [f'{ion_name}']*n_ions)
         ion_u.add_TopologyAttr('type', [f'{ion_name}']*n_ions)
-        ion_u.add_TopologyAttr('resname', [f'{ion_name}']*n_ions)
+        ion_u.add_TopologyAttr('resname', [f'{ion_name.upper()}']*n_ions)
         ion_u.add_TopologyAttr('resid', list(np.arange(n_residues+1, n_residues+n_ions+1)))
 
         ion_u.atoms.positions = np.array(ion_pos[:n_ions])

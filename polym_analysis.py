@@ -61,6 +61,7 @@ class PolymAnalysis():
         # Store input information about atom types
         self.xlink_n_type = xlink_n
         self.xlink_c_type = xlink_c
+        self.term_n_type = term_n
         self.cl_type = cl_type
         self.oh_type = oh_type
         self.ow_type = ow_type
@@ -342,6 +343,19 @@ class PolymAnalysis():
                 self.element_map[a]['number'] = 1
             else:
                 raise TypeError(f'Element {a} with mass {mass} not implemented... Add it to self._guess_elements')
+
+    def _generate_tpr(self, top, coord, mdp='min.mdp', tpr=None, flags={}, gmx='gmx'):
+        '''Use Gromacs gmx grompp to generate a tpr file'''
+
+        if tpr is None:
+            tpr = coord.split('.')[0] + '.tpr'
+        cmd = [f'{gmx} grompp -f {mdp} -p {top} -c {coord} -o {tpr}']
+        
+        for f in flags:
+            cmd[0] += f' -{f} {flags[f]}'
+
+        self._run(cmd)
+        return tpr
 
 
     def load_logs(self, log_files):
@@ -968,6 +982,12 @@ class PolymAnalysis():
         else:
             cmd = f'echo {water_sel} | {self.gmx} genion -s {self.tpr} -p {top} -o {output} -nn {n_anions} -nname {anion_name} -nq {anion_charge} -np {n_cations} -pname {cation_name} -pq {cation_charge}'
             self._run(cmd)
+
+        # reinitialize the class with updated ions
+        self._generate_tpr(top, output, tpr=self.tpr, gmx=self.gmx, flags={'maxwarn' : 1})
+        self.__init__(output, frmt='GRO', tpr_file=self.tpr, 
+                      xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+                      cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type)
 
 
     def calculate_density(self, atom_group='all', box=False):

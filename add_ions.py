@@ -58,16 +58,16 @@ if __name__ == '__main__':
     anion = 'Cl'
     cation_charge = 1
     anion_charge = -1
-    extra_added = 65 # 65 is the number for 50% deprotonated, adding for statistics and comparability even though fully protonated
+    extra_added = 0 # 65 is the number for 50% deprotonated, adding to 0% deprotonated for statistics and comparability even though fully protonated
     C = 0.2 # M = mol / L
 
     # for now, manually add the atomtypes for the ions from ions.itp to beginning of top file and include ions.itp at bottom of top file
     # SAVING AS: pre_ions.top
     ion_top = 'pre_ions.top'
-    input_gro = 'hydrated.gro'
+    input_gro = 'deprotonated.gro'
 
     # generate tpr that MDAnalysis can read
-    tpr = generate_tpr(ion_top, input_gro, mdp='min.mdp', tpr='hydrated.tpr', gmx='gmx')
+    tpr = generate_tpr(ion_top, input_gro, mdp='min.mdp', tpr='deprotonated.tpr', gmx='gmx')
 
     # define proper types for Gromacs system
     xlink_c = 'c and bonded type n'
@@ -122,6 +122,10 @@ if __name__ == '__main__':
     elif excess_charge > 0:
         n_cations = n_salt * c
         n_anions = int(-excess_charge / anion_charge + n_salt * a)
+    else:
+        n_cations = n_salt * c
+        n_anions = n_salt * a
+        
 
     total_charge = excess_charge + n_cations*cation_charge + n_anions*anion_charge
     if abs(total_charge) == 1: # this should only happen with one ion being +/-1 and the other being +/-2
@@ -133,4 +137,15 @@ if __name__ == '__main__':
     gro.insert_ions(n_anions=n_anions, anion_name=anion.upper(), anion_charge=anion_charge,
                     n_cations=n_cations, cation_name=cation.upper(), cation_charge=cation_charge, 
                     top=new_top, output=new_gro, water_sel=18)
+
+    # gmx genion (which is what I use in PolymAnalysis.insert_ions()) requires ions to be named in all caps
+    # but, my ion parameters use element names with lower case second letters
+    # manually reassign atom names in the GRO to avoid WARNING in gmx grompp
+    u = mda.Universe(new_gro)
+    new_names = u.atoms.names
+    new_names[new_names == cation.upper()] = cation
+    new_names[new_names == anion.upper()] = anion
+    u.add_TopologyAttr('name', new_names)
+    u.atoms.write(new_gro)
+
     new_tpr = generate_tpr(top=new_top, coord=new_gro, mdp='min.mdp', tpr='PA_ions.tpr', gmx='gmx')

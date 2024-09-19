@@ -42,8 +42,8 @@ if __name__ == '__main__':
     # calculate the discrete free energies
     res = umb.calculate_discrete_FE(cn_range, biased, r0, n_bootstraps=50, filename='discrete_FE.dat')
 
-    plt.bar(bins, res['f_i'], width=0.25, fc='blue', ec='black', alpha=0.5, label='discrete CN')
-    plt.errorbar(bins, res['f_i'], yerr=res['df_i'], fmt='none', color='blue')
+    plt.bar(res.coordination_number, res.free_energy, width=0.25, fc='blue', ec='black', alpha=0.5, label='discrete CN')
+    plt.errorbar(res.coordination_number, res.free_energy, yerr=res.error, fmt='none', color='blue')
     plt.plot(umb.bin_centers, umb.fes, c='blue', alpha=0.5, label='continuous CN')
     plt.fill_between(umb.bin_centers, umb.fes-umb.error, umb.fes+umb.error, fc='blue', alpha=0.5)
     plt.xlabel('coordination number')

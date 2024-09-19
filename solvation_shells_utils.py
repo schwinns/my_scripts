@@ -1541,6 +1541,8 @@ class UmbrellaAnalysis:
 
         '''
 
+        import pymbar
+
         if self._fes is None:
             raise ValueError('Continuous coordination number free energy surface not found. Try `calculate_FES()` first')
         
@@ -1555,7 +1557,7 @@ class UmbrellaAnalysis:
 
         # prepare the Results object
         results = Results()
-        results.coordination_number = np.arange(cn_range[0], cn_range[1])
+        results.coordination_number = np.arange(cn_range[0], cn_range[1]+1)
         results.free_energy = np.zeros((cn_range[1] - cn_range[0]))
         results.error = np.zeros((cn_range[1] - cn_range[0]))
     
@@ -1573,6 +1575,7 @@ class UmbrellaAnalysis:
         bins = np.arange(cn_range[0], cn_range[1]+1)
 
         if n_bootstraps > 0:
+            print(f'Calculating discrete free energies with {n_bootstraps} bootstraps...')
             # if calculating error, get uncorrelated discrete coordination numbers
             N_k = self._N_k
             cn_kn = cn.reshape((n_sims, umb_frames))
@@ -1586,6 +1589,7 @@ class UmbrellaAnalysis:
             res = self._fes.get_fes(bins, reference_point='from-lowest', uncertainty_method='bootstrap')
 
         else:
+            print(f'Calculating discrete free energies without error...')
             # do not calculate error, since unsure what histogram error means for this case
             self._fes.generate_fes(self.u_kn, cn, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges})
             res = self._fes.get_fes(bins, reference_point='from-lowest', uncertainty_method=None)

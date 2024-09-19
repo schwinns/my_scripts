@@ -1558,8 +1558,8 @@ class UmbrellaAnalysis:
         # prepare the Results object
         results = Results()
         results.coordination_number = np.arange(cn_range[0], cn_range[1]+1)
-        results.free_energy = np.zeros((cn_range[1] - cn_range[0]))
-        results.error = np.zeros((cn_range[1] - cn_range[0]))
+        results.free_energy = np.zeros((cn_range[1] - cn_range[0] + 1))
+        results.error = np.zeros((cn_range[1] - cn_range[0] + 1))
     
         # determine indices to remove to ensure COLVAR time and Universe time match
         n_sims = len(self.colvars)
@@ -1571,7 +1571,7 @@ class UmbrellaAnalysis:
         cn = np.delete(cn, to_remove)
 
         # get the discrete bins
-        bin_edges = np.linspace(cn_range[0], cn_range[1], (cn_range[1] - cn_range[0]) + 2)
+        bin_edges = np.arange(cn_range[0]-0.5, cn_range[1]+1.5)
         bins = np.arange(cn_range[0], cn_range[1]+1)
 
         if n_bootstraps > 0:
@@ -1587,6 +1587,7 @@ class UmbrellaAnalysis:
 
             self._fes.generate_fes(self.u_kn, cn, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges}, n_bootstraps=n_bootstraps)
             res = self._fes.get_fes(bins, reference_point='from-lowest', uncertainty_method='bootstrap')
+            results.error = res['df_i']*self.kT
 
         else:
             print(f'Calculating discrete free energies without error...')
@@ -1596,7 +1597,6 @@ class UmbrellaAnalysis:
 
         # convert to kJ/mol and save in Results object
         results.free_energy = res['f_i']*self.kT
-        results.error = res['df_i']*self.kT
 
         if filename is not None:
             np.savetxt(filename, np.vstack([results.coordination_number, results.free_energy, results.error]).T, header='coordination number, free energy (kJ/mol), error (kJ/mol)')

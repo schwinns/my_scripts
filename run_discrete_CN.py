@@ -22,6 +22,7 @@ if __name__ == '__main__':
     d_max = 8
     cn_range = (2,8)
     nbins = 200
+    n_boots = 50
 
     r0 = 3.15
     cation = 'resname NA'
@@ -31,7 +32,10 @@ if __name__ == '__main__':
     print('Loading COLVARs')
     umb = UmbrellaAnalysis(n_sims, start=start, by=by)
     print('\nCalculating FES')
-    bins, fes = umb.calculate_FES(umb_centers, KAPPA=K_values, d_min=d_min, d_max=d_max, nbins=nbins, error=True)
+    if n_boots == 0:
+        bins, fes = umb.calculate_FES(umb_centers, KAPPA=K_values, d_min=d_min, d_max=d_max, nbins=nbins, error=False) # do not subsample time series if we are not calculating error in discrete FE
+    else:
+        bins, fes = umb.calculate_FES(umb_centers, KAPPA=K_values, d_min=d_min, d_max=d_max, nbins=nbins, error=True)
 
     # load in trajectories
     print('\nLoading coordinates')
@@ -40,7 +44,7 @@ if __name__ == '__main__':
     biased = mda.AtomGroup([umb.cations[0]]) # NOTE: should change if not using biased cation
 
     # calculate the discrete free energies
-    res = umb.calculate_discrete_FE(cn_range, biased, r0, n_bootstraps=50, filename='discrete_FE.dat')
+    res = umb.calculate_discrete_FE(cn_range, biased, r0, n_bootstraps=n_boots, filename='discrete_FE.dat')
 
     plt.bar(res.coordination_number, res.free_energy, width=0.25, fc='blue', ec='black', alpha=0.5, label='discrete CN')
     plt.errorbar(res.coordination_number, res.free_energy, yerr=res.error, fmt='none', color='blue')

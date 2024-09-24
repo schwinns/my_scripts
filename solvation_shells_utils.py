@@ -2237,7 +2237,7 @@ class UmbrellaAnalysis:
         self.universe.trajectory[frame_idx]
 
         # calculate distances and compare to hydration shell cutoff
-        d = distances.distance_array(biased_ion, self.universe.select_atoms('not element H') - biased_ion, box=self.universe.dimensions)
+        d = distances.distance_array(biased_ion, self.universe.select_atoms('not type HW* MW') - biased_ion, box=self.universe.dimensions)
         coordination_number = (d <= radius).sum()
 
         return coordination_number

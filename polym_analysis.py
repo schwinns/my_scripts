@@ -1289,10 +1289,12 @@ class PolymAnalysis():
         plt.close()
 
 
-    def rdf(self, atom_group1, atom_group2, range=(0,15), output='rdf.png', **kwargs):
+    def rdf(self, atom_group1, atom_group2, range=(0,15), nbins=75, output='rdf.png', **kwargs):
         '''Calculate the RDF from atom_group1 to atom_group2 using MDAnalysis InterRDF'''
 
         from MDAnalysis.analysis.rdf import InterRDF
+
+        print(f'Calculating the RDF for {atom_group1} and {atom_group2} over {self.universe.trajectory} frames')
 
         if isinstance(atom_group1, str): # if provided selection language, make AtomGroup
             g1 = self.universe.select_atoms(atom_group1)
@@ -1304,7 +1306,7 @@ class PolymAnalysis():
         else:
             g2 = atom_group2
 
-        rdf = InterRDF(g1, g2, range=range, verbose=True)
+        rdf = InterRDF(g1, g2, range=range, nbins=nbins, verbose=True)
         rdf.run(**kwargs)
         self.rdf_results = rdf.results
 

@@ -516,19 +516,23 @@ class EquilibriumAnalysis:
         nbins = int((range[1] - range[0]) / bin_width)
         self.rdfs = {}
 
-        ci_w = rdf.InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf')
+        print('\nCalculating cation-water RDF...')
+        ci_w = rdf.InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
         ci_w.run(step=step)
         self.rdfs['ci-w'] = ci_w.results
 
-        ai_w = rdf.InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf')
+        print('\nCalculating anion-water RDF...')
+        ai_w = rdf.InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
         ai_w.run(step=step)
         self.rdfs['ai-w'] = ai_w.results
 
-        w_w = rdf.InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf')
+        print('\nCalculating water-water RDF...')
+        w_w = rdf.InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
         w_w.run(step=step)
         self.rdfs['w-w'] = w_w.results
 
-        ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf')
+        print('\nCalculating cation-anion RDF...')
+        ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf', verbose=True)
         ci_ai.run(step=step)
         self.rdfs['ci-ai'] = ci_ai.results
 
@@ -1472,7 +1476,7 @@ class UmbrellaAnalysis:
 
         # Step 1: Subsample timeseries
         print('Subsampling timeseries...')
-        u_kn, u_kln, N_k, d_kn = self._subsample_timeseries(error=error)
+        u_kn, u_kln, N_k, d_kn = self._subsample_timeseries(error=error, plot=True)
         
         # Step 2: Bin the data
         bin_center_i = np.zeros([nbins])
@@ -1521,18 +1525,22 @@ class UmbrellaAnalysis:
         return self.bin_centers, self.fes
     
 
-    def calculate_discrete_FE(self, cn_range, biased_ion, radius, n_bootstraps=0, filename=None, **kwargs):
+    def calculate_discrete_FE(self, biased_ion, radius, n_bootstraps=0, cn_range=None, filename=None, **kwargs):
         '''
         Calculate the free energies associated with the discrete coordination number states from the continuous coordination number simulations
 
         Parameters
         ----------
-        cn_range : array-like
-            The range of discrete coordination numbers to calculate the free energies
         biased_ion : str, MDAnalysis.AtomGroup
             Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
         radius : float
             Hydration shell cutoff for the ion (Angstroms)
+        n_bootstraps : int
+            Number of bootstraps for the uncertainty calculation, default=0
+        cn_range : array-like
+            Coordination number range to calculate the discrete free energoes, default=None means use the min and max observed
+        filename : str
+            Name of the file to save the discrete free energies
 
         Returns
         -------
@@ -1555,20 +1563,23 @@ class UmbrellaAnalysis:
         else:
             ion = biased_ion
 
-        # prepare the Results object
-        results = Results()
-        results.coordination_number = np.arange(cn_range[0], cn_range[1]+1)
-        results.free_energy = np.zeros((cn_range[1] - cn_range[0] + 1))
-        results.error = np.zeros((cn_range[1] - cn_range[0] + 1))
-    
         # determine indices to remove to ensure COLVAR time and Universe time match
         n_sims = len(self.colvars)
         total_frames = self.universe.trajectory.n_frames
         umb_frames = self.colvars[0].time.shape[0]
         to_remove = np.arange(umb_frames, total_frames+1, umb_frames+1)
 
-        cn = self.get_coordination_numbers(ion, radius, **kwargs)
+        cn = self.get_coordination_numbers(ion, radius, filename='tmp_CN.csv', **kwargs)
         cn = np.delete(cn, to_remove)
+        if cn_range is None:
+            cn_range = (cn.min(), cn.max())
+        print(f'\tDiscrete coordination numbers range: ({cn.min()}, {cn.max()})')
+
+        # prepare the Results object
+        results = Results()
+        results.coordination_number = np.arange(cn_range[0], cn_range[1]+1)
+        results.free_energy = np.zeros((cn_range[1] - cn_range[0] + 1))
+        results.error = np.zeros((cn_range[1] - cn_range[0] + 1))
 
         # get the discrete bins
         bin_edges = np.arange(cn_range[0]-0.5, cn_range[1]+1.5)
@@ -1899,6 +1910,72 @@ class UmbrellaAnalysis:
         return self.angular_distributions
     
 
+    def water_dipole_distribution(self, biased_ion, radius, n_max=12, njobs=1, step=1):
+        '''
+        Calculate the distribution of angles between the water dipole and the oxygen-ion vector
+
+        Parameters
+        ----------
+        biased_ion : MDAnalysis.Atom
+            Ion to calculate the distribution for, the ion whose coordination shell has been biased.
+        radius : float
+            Hydration shell cutoff in Angstroms to select waters within hydration shell only
+        n_max : int
+            Maximum number of coordinated waters, if discrete coordination numbers have been calculated, will use
+            the max of `self.coordination_numbers`, default=12
+        njobs : int
+            How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
+            distribute the analysis. If -1, use all available processors.
+        step : int
+            Step to iterate the trajectory when running the analysis, default=1
+
+        Returns
+        -------
+        results :  MDAnalysis Results class with attribute angles
+            Angles for all waters coordinated with biased ion
+
+        '''
+
+        if self.coordination_numbers is not None: # if discrete coordination numbers have been calculated create a time x max number coordinating array
+            n_max = self.coordination_numbers.max()
+
+        # prepare the Results object
+        results = Results()
+        results.angles = np.empty((len(self.universe.trajectory[::step]),n_max))
+        results.angles[:] = np.nan # should be NaN if not specified
+
+        if njobs == 1: # run on 1 CPU
+
+            for i,ts in tqdm(enumerate(self.universe.trajectory[::step])):
+                ang = self._water_dipole_per_frame(i, biased_ion, radius=radius)
+                results.angles[i,:] = ang
+
+        else: # run in parallel
+
+            import multiprocessing
+            from multiprocessing import Pool
+            from functools import partial
+            
+            if njobs == -1:
+                n = multiprocessing.cpu_count()
+            else:
+                n = njobs
+
+            run_per_frame = partial(self._water_dipole_per_frame,
+                                    biased_ion=biased_ion,
+                                    radius=radius,
+                                    n_max=n_max)
+            frame_values = np.arange(self.universe.trajectory.n_frames, step=step)
+
+            with Pool(n) as worker_pool:
+                result = worker_pool.map(run_per_frame, frame_values)
+
+            ang = np.asarray(result)
+            results.angles = ang 
+        
+        return results
+    
+
     def polyhedron_size(self, biased_ion, r0=3.15, njobs=1, step=1):
         '''
         Calculate the maximum cross-sectional areas and volumes as time series for coordination shells.
@@ -2002,7 +2079,7 @@ class UmbrellaAnalysis:
         return self.universe
     
 
-    def get_coordination_numbers(self, biased_ion, radius, njobs=1):
+    def get_coordination_numbers(self, biased_ion, radius, filename=None, njobs=1):
         '''
         Calculate the discrete total coordination number as a function of time for biased ion.
         
@@ -2012,6 +2089,8 @@ class UmbrellaAnalysis:
             Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
         radius : float
             Hydration shell cutoff for the ion (Angstroms)
+        filename : str
+            Name of the file to save the discrete coordination numbers, default=None means do not save
         njobs : int
             How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
             distribute the analysis. If -1, use all available processors.
@@ -2065,10 +2144,16 @@ class UmbrellaAnalysis:
 
             self.coordination_numbers = np.asarray(result)
 
+        if filename is not None:
+            df = pd.DataFrame()
+            df['idx'] = np.arange(0,len(self.coordination_numbers))
+            df['coordination_number'] = self.coordination_numbers
+            df.to_csv(filename, index=False)
+
         return self.coordination_numbers
 
 
-    def _subsample_timeseries(self, error=True):
+    def _subsample_timeseries(self, error=True, plot=False):
         '''
         Subsample the timeseries to get uncorrelated samples. This function also sets up the variables 
         needed for pymbar.MBAR object and pymbar.FES object.
@@ -2077,6 +2162,8 @@ class UmbrellaAnalysis:
         ----------
         error : bool
             Calculate error. If False, we do not need to subsample timeseries, default=True
+        plot : bool
+            Plot the sampling distributions. If both `plot` and `error` are True, then plot the uncorrelated samples, default=False
         
         Returns
         -------
@@ -2130,6 +2217,28 @@ class UmbrellaAnalysis:
 
         N_max = np.max(N_k) # shorten the array size
         u_kln = np.zeros([K, K, N_max]) # u_kln[k,n] is the reduced potential energy of snapshot n from umbrella simulation k
+
+        if error and plot:
+            fig, ax = plt.subplots(1,1, figsize=(8,4))
+            ax.set_xlabel('Coordination number, continuous')
+            ax.set_ylabel('Counts')
+            for k in range(K):
+                ax.hist(self.uncorrelated_samples[k], bins=50, alpha=0.5)
+
+            ax.set_xlim(d_kn.min()-0.5, d_kn.max()+0.5)
+            fig.savefig('uncorrelated_sampling.png')
+            plt.close()
+
+        elif plot:
+            fig, ax = plt.subplots(1,1, figsize=(8,4))
+            ax.set_xlabel('Coordination number, continuous')
+            ax.set_ylabel('Counts')
+            for k in range(K):
+                ax.hist(self.colvars[k].coordination_number, bins=50, alpha=0.5)
+
+            ax.set_xlim(d_kn.min()-0.5, d_kn.max()+0.5)
+            fig.savefig('sampling.png')
+            plt.close()
 
         return u_kn, u_kln, N_k, d_kn
     
@@ -2241,6 +2350,62 @@ class UmbrellaAnalysis:
         coordination_number = (d <= radius).sum()
 
         return coordination_number
+    
+
+    def _water_dipole_per_frame(self, frame_idx, biased_ion, radius, n_max=12):
+        '''
+        Calculate the distribution of angles between the water dipole and the oxygen-ion vector
+
+        Parameters
+        ----------
+        frame_idx : int
+            Index of the frame
+        biased_ion : MDAnalysis.Atom
+            Ion to calculate the distribution for, the ion whose coordination shell has been biased.
+        radius : float
+            Hydration shell cutoff in Angstroms to select waters within hydration shell only
+        n_max : int
+            Maximum number of coordinated waters, if discrete coordination numbers have been calculated, will use
+            the max of `self.coordination_numbers`, default=12
+
+        Returns
+        -------
+        angles : np.array
+            Angles for the waters coordinated on this frame, size n_max
+
+        '''
+
+        # initialize the frame
+        self.universe.trajectory[frame_idx]
+
+        my_atoms = self.universe.select_atoms(f'sphzone {radius} index {biased_ion.index}') - biased_ion
+        my_waters = my_atoms & self.waters # intersection operator to get the OW from my_atoms
+
+        angles = np.empty(n_max)
+        angles[:] = np.nan
+        for j,ow in enumerate(my_waters):
+
+            dist = biased_ion.position - ow.position
+
+            # if the water is on the other side of the box, move it back
+            for d in range(3):
+                v = np.array([0,0,0])
+                v[d] = 1
+                if dist[d] >= self.universe.dimensions[d]/2:
+                    ow.residue.atoms.translate(v*self.universe.dimensions[d])
+                elif dist[d] <= -self.universe.dimensions[d]/2:
+                    ow.residue.atoms.translate(-v*self.universe.dimensions[d])
+
+            # calculate and save angles
+            pos = ow.position
+            bonded_Hs = ow.bonded_atoms
+            tmp_pt = bonded_Hs.positions.mean(axis=0)
+
+            v1 = biased_ion.position - pos
+            v2 = pos - tmp_pt
+            angles[j] = get_angle(v1, v2)*180/np.pi
+
+        return angles
 
 
     def _polyhedron_size_per_frame(self, frame_idx, biased_ion, r0=3.15, for_visualization=False):

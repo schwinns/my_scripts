@@ -20,7 +20,6 @@ if __name__ == '__main__':
 
     d_min = 2
     d_max = 8
-    cn_range = (2,8)
     nbins = 200
     n_boots = 50
 
@@ -44,7 +43,7 @@ if __name__ == '__main__':
     biased = mda.AtomGroup([umb.cations[0]]) # NOTE: should change if not using biased cation
 
     # calculate the discrete free energies
-    res = umb.calculate_discrete_FE(cn_range, biased, r0, n_bootstraps=n_boots, filename='discrete_FE.dat')
+    res = umb.calculate_discrete_FE(biased, r0, n_bootstraps=n_boots, filename='discrete_FE.dat')
 
     plt.bar(res.coordination_number, res.free_energy, width=0.25, fc='blue', ec='black', alpha=0.5, label='discrete CN')
     plt.errorbar(res.coordination_number, res.free_energy, yerr=res.error, fmt='none', color='blue')

@@ -2079,7 +2079,7 @@ class UmbrellaAnalysis:
         return self.universe
     
 
-    def get_coordination_numbers(self, biased_ion, radius, filename=None, njobs=1):
+    def get_coordination_numbers(self, biased_ion, radius, filename=None, njobs=1, verbose=False):
         '''
         Calculate the discrete total coordination number as a function of time for biased ion.
         
@@ -2094,6 +2094,8 @@ class UmbrellaAnalysis:
         njobs : int
             How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
             distribute the analysis. If -1, use all available processors.
+        verbose : bool
+            Whether to show progress in parallel, does nothing if `njobs` = 1, default=False
         
         Returns
         -------
@@ -2118,7 +2120,7 @@ class UmbrellaAnalysis:
             # initialize coordination number as a function of time
             self.coordination_numbers = np.zeros(len(self.universe.trajectory))
 
-            for i,ts in enumerate(self.universe.trajectory):
+            for i,ts in tqdm(enumerate(self.universe.trajectory)):
                 self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius)
 
         else: # run in parallel
@@ -2136,7 +2138,8 @@ class UmbrellaAnalysis:
 
             run_per_frame = partial(self._coordination_number_per_frame,
                                     biased_ion=biased_ion,
-                                    radius=radius)
+                                    radius=radius,
+                                    verbose=verbose)
             frame_values = np.arange(self.universe.trajectory.n_frames)
 
             with Pool(n) as worker_pool:
@@ -2324,7 +2327,7 @@ class UmbrellaAnalysis:
         return f
     
 
-    def _coordination_number_per_frame(self, frame_idx, biased_ion, radius):
+    def _coordination_number_per_frame(self, frame_idx, biased_ion, radius, verbose=False):
         '''
         Calculate the discrete total coordination number as a function of time for biased ion.
 
@@ -2334,6 +2337,8 @@ class UmbrellaAnalysis:
             MDAnalysis AtomGroup of the biased ion
         radius : float
             Hydration shell cutoff for the ion (Angstroms)
+        verbose : bool
+            Whether to print progress, default=False
 
         Returns
         -------
@@ -2348,6 +2353,9 @@ class UmbrellaAnalysis:
         # calculate distances and compare to hydration shell cutoff
         d = distances.distance_array(biased_ion, self.universe.select_atoms('not type HW* MW') - biased_ion, box=self.universe.dimensions)
         coordination_number = (d <= radius).sum()
+
+        if verbose:
+            print(f'\tCoordination number on frame {frame_idx} = {coordination_number}')
 
         return coordination_number
     

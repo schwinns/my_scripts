@@ -2079,7 +2079,7 @@ class UmbrellaAnalysis:
         return self.universe
     
 
-    def get_coordination_numbers(self, biased_ion, radius, filename=None, njobs=1, verbose=False):
+    def get_coordination_numbers(self, biased_ion, radius, filename=None, njobs=1):
         '''
         Calculate the discrete total coordination number as a function of time for biased ion.
         
@@ -2092,10 +2092,8 @@ class UmbrellaAnalysis:
         filename : str
             Name of the file to save the discrete coordination numbers, default=None means do not save
         njobs : int
-            How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
-            distribute the analysis. If -1, use all available processors.
-        verbose : bool
-            Whether to show progress in parallel, does nothing if `njobs` = 1, default=False
+            How many processors to run the calculation with, default=1. If greater than 1, use MDAnalysis
+            OpenMP backend to calculate distances.
         
         Returns
         -------
@@ -2121,31 +2119,17 @@ class UmbrellaAnalysis:
             self.coordination_numbers = np.zeros(len(self.universe.trajectory))
 
             for i,ts in tqdm(enumerate(self.universe.trajectory)):
-                self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius)
+                self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='serial')
 
         else: # run in parallel
 
-            import multiprocessing
-            from multiprocessing import Pool
-            from functools import partial
-            
-            if njobs == -1:
-                n = multiprocessing.cpu_count()
-            else:
-                n = njobs
+            print(f'\nCalculating the discrete coordination numbers using {njobs} CPUs...')
 
-            print(f'\nCalculating the discrete coordination numbers using {n} CPUs...')
+            # initialize coordination number as a function of time
+            self.coordination_numbers = np.zeros(len(self.universe.trajectory))
 
-            run_per_frame = partial(self._coordination_number_per_frame,
-                                    biased_ion=biased_ion,
-                                    radius=radius,
-                                    verbose=verbose)
-            frame_values = np.arange(self.universe.trajectory.n_frames)
-
-            with Pool(n) as worker_pool:
-                result = worker_pool.map(run_per_frame, frame_values)
-
-            self.coordination_numbers = np.asarray(result)
+            for i,ts in tqdm(enumerate(self.universe.trajectory)):
+                self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='OpenMP')
 
         if filename is not None:
             df = pd.DataFrame()
@@ -2327,18 +2311,18 @@ class UmbrellaAnalysis:
         return f
     
 
-    def _coordination_number_per_frame(self, frame_idx, biased_ion, radius, verbose=False):
+    def _coordination_number_per_frame(self, frame_idx, biased_ion, radius, **kwargs):
         '''
         Calculate the discrete total coordination number as a function of time for biased ion.
 
         Parameters
         ----------
+        frame_idx : int
+            Index of the trajectory frame
         biased_ion : MDAnalysis.AtomGroup
             MDAnalysis AtomGroup of the biased ion
         radius : float
             Hydration shell cutoff for the ion (Angstroms)
-        verbose : bool
-            Whether to print progress, default=False
 
         Returns
         -------
@@ -2351,11 +2335,9 @@ class UmbrellaAnalysis:
         self.universe.trajectory[frame_idx]
 
         # calculate distances and compare to hydration shell cutoff
-        d = distances.distance_array(biased_ion, self.universe.select_atoms('not type HW* MW') - biased_ion, box=self.universe.dimensions)
+        d = distances.distance_array(biased_ion, self.universe.select_atoms('not type HW* MW') - biased_ion, 
+                                     box=self.universe.dimensions, **kwargs)
         coordination_number = (d <= radius).sum()
-
-        if verbose:
-            print(f'\tCoordination number on frame {frame_idx} = {coordination_number}')
 
         return coordination_number
     

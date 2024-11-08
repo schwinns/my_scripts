@@ -2441,9 +2441,6 @@ class UmbrellaAnalysis:
         pos = self._points_on_atomic_radius(shell, n_points=200)
         center = ion.position
 
-        if len(shell) < 4: # cannot create a polyhedron
-            return np.nan, np.nan
-
         # Create the polyhedron with a ConvexHull and save volume
         hull = ConvexHull(pos)
         volume = hull.volume

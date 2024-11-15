@@ -197,8 +197,9 @@ class ParallelAnalysisBase(object):
         logger.info("Starting preparation")
         self._prepare()
 
-        if njobs == 1: 
+        if njobs == 1:
 
+            self._result = []
             for i, ts in enumerate(ProgressBar(
                     self._trajectory[self.start:self.stop:self.step],
                     verbose=verbose)):
@@ -207,7 +208,7 @@ class ParallelAnalysisBase(object):
                 self.frames[i] = ts.frame
                 self.times[i] = ts.time
                 # logger.info("--> Doing frame {} of {}".format(i+1, self.n_frames))
-                self._single_frame(i)
+                self._result.append(self._single_frame(i))
         
         else:
 
@@ -216,11 +217,11 @@ class ParallelAnalysisBase(object):
             else:
                 n = njobs
 
+            print(f'Running InterRDF with {n} CPUs')
             frame_values = np.arange(len(self._trajectory[self.start:self.stop:self.step]))
 
             with Pool(n) as worker_pool:
-                result = worker_pool.map(self._single_frame, frame_values)
-
+                self._result = worker_pool.map(self._single_frame, frame_values)
 
         logger.info("Finishing up")
         self._conclude()
@@ -326,11 +327,15 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
 
         count = np.histogram(dist, **self.rdf_settings)[0]
-        self.count += count
 
-        self.volume += self._ts.volume
+        return count, self._ts.volume # return, rather than accumulate
 
     def _conclude(self):
+        # gather the results from all processes and sum
+        for res in self._result:
+            self.count += res[0]
+            self.volume += res[1]
+
         # Number of each selection
         nA = len(self.g1)
         nB = len(self.g2)

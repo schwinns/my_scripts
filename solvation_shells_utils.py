@@ -1569,7 +1569,11 @@ class UmbrellaAnalysis:
         umb_frames = self.colvars[0].time.shape[0]
         to_remove = np.arange(umb_frames, total_frames+1, umb_frames+1)
 
-        cn = self.get_coordination_numbers(ion, radius, filename='tmp_CN.csv', **kwargs)
+        if self.coordination_numbers is None:
+            cn = self.get_coordination_numbers(ion, radius, filename='tmp_CN.csv', **kwargs)
+        else:
+            cn = self.coordination_numbers
+        
         cn = np.delete(cn, to_remove)
         if cn_range is None:
             cn_range = (cn.min(), cn.max())

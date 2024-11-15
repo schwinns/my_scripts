@@ -20,6 +20,12 @@ if __name__ == '__main__':
     bi = 'NA'
     r0 = 3.15
 
+    # which analyses to run
+    discrete_cn = False
+    rdfs = False
+    water_dipoles = False
+    polyhedron_sizes = True
+
     # intialize UmbrellaAnalysis
     print('Loading data...')
     start_time = time.perf_counter()
@@ -33,57 +39,65 @@ if __name__ == '__main__':
     load_data_time = time.perf_counter()
 
     # calculate the discrete coordination nubers and save as csv
-    cn = umb.get_coordination_numbers(mda.AtomGroup([biased_ion]), r0, njobs=njobs)
-    df = pd.DataFrame()
-    df['idx'] = np.arange(0,len(cn))
-    df['time'] = df['idx']*dt
-    df['coordination_number'] = cn
-    df.to_csv('discrete_coordination_numbers.csv', index=False)
+    if discrete_cn:
+        cn = umb.get_coordination_numbers(mda.AtomGroup([biased_ion]), r0, njobs=njobs)
+        df = pd.DataFrame()
+        df['idx'] = np.arange(0,len(cn))
+        df['time'] = df['idx']*dt
+        df['coordination_number'] = cn
+        df.to_csv('discrete_coordination_numbers.csv', index=False)
+
     cn_time = time.perf_counter()
 
     # calculate the RDFs by CN and save as csvs by CN
-    print('Calculating the RDFs by discrete coordination number...')
-    umb.rdfs_by_coordination(mda.AtomGroup([biased_ion]), np.arange(1,16))
+    if rdfs:
+        print('Calculating the RDFs by discrete coordination number...')
+        df = pd.read_csv('discrete_coordination_numbers.csv')
+        umb.coordination_numbers = df['coordination_number']
+        umb.rdfs_by_coordination(mda.AtomGroup([biased_ion]), np.arange(1,16))
 
-    for i in umb.rdfs['i-w'].keys():
-        df = pd.DataFrame()
-        df['r'] = umb.rdfs['i-w'][i].bins
-        for k in umb.rdfs.keys():
-            df[k] = umb.rdfs[k][i].rdf
+        for i in umb.rdfs['i-w'].keys():
+            df = pd.DataFrame()
+            df['r'] = umb.rdfs['i-w'][i].bins
+            for k in umb.rdfs.keys():
+                df[k] = umb.rdfs[k][i].rdf
 
-        df = df.fillna(0)
-        df.to_csv(f'rdf_CN_{i}.csv', index=False)
+            df = df.fillna(0)
+            df.to_csv(f'rdf_CN_{i}.csv', index=False)
 
     rdf_time = time.perf_counter()
 
     # calculate the water dipoles
-    print('Calculating water dipoles...')
-    res1 = umb.water_dipole_distribution(biased_ion, radius=r0, njobs=njobs)
-    with open(f'water_dipoles.pl', 'wb') as output:
-            pickle.dump(res1, output, pickle.HIGHEST_PROTOCOL)
+    if water_dipoles:
+        print('Calculating water dipoles...')
+        res1 = umb.water_dipole_distribution(biased_ion, radius=r0, njobs=njobs)
+        with open(f'water_dipoles.pl', 'wb') as output:
+                pickle.dump(res1, output, pickle.HIGHEST_PROTOCOL)
 
     water_dipole_time = time.perf_counter()
 
     # calculate the polyhedron sizes
-    print('Running polyhedron size analysis...')
-    res2 = umb.polyhedron_size(biased_ion, r0=r0, njobs=njobs)
-    with open(f'polyhedrons.pl', 'wb') as output:
-            pickle.dump(res2, output, pickle.HIGHEST_PROTOCOL)
+    if polyhedron_sizes:
+        print('Running polyhedron size analysis...')
+        res2 = umb.polyhedron_size(biased_ion, r0=r0, njobs=njobs)
+        with open(f'polyhedrons.pl', 'wb') as output:
+                pickle.dump(res2, output, pickle.HIGHEST_PROTOCOL)
 
     polyhedron_time = time.perf_counter()
 
-    print('Plotting some results...')    
-    plt.figure()
-    plt.hist(res1.angles.flatten(), bins=50, ec='white')
-    plt.ylabel('counts')
-    plt.xlabel('water dipoles (degrees)')
-    plt.savefig('dipoles_hist.png')
-    
-    plt.figure()
-    plt.hist(res2.areas, bins=50, ec='white')
-    plt.ylabel('counts')
-    plt.xlabel('area ($\AA^2$)')
-    plt.savefig('area_hist.png')
+    if polyhedron_sizes:
+        print('Plotting some results...')    
+        plt.figure()
+        plt.hist(res1.angles.flatten(), bins=50, ec='white')
+        plt.ylabel('counts')
+        plt.xlabel('water dipoles (degrees)')
+        plt.savefig('dipoles_hist.png')
+        
+        plt.figure()
+        plt.hist(res2.areas, bins=50, ec='white')
+        plt.ylabel('counts')
+        plt.xlabel('area ($\AA^2$)')
+        plt.savefig('area_hist.png')
 
     plot_time = time.perf_counter()
 

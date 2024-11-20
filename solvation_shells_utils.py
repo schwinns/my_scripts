@@ -487,7 +487,7 @@ class EquilibriumAnalysis:
         print(f"Hydration shell cutoff for anion-water = {self.solute_ai.radii['water']:.6f}")
     
 
-    def generate_rdfs(self, bin_width=0.05, range=(0,20), step=1, filename=None):
+    def generate_rdfs(self, bin_width=0.05, range=(0,20), step=1, filename=None, njobs=1):
         '''
         Calculate radial distributions for the solution. This method calculates the RDFs for cation-water,
         anion-water, water-water, and cation-anion using MDAnalysis InterRDF. It saves the data in a 
@@ -503,6 +503,8 @@ class EquilibriumAnalysis:
             Trajectory step for which to calculate the RDF, default=1
         filename : str
             Filename to save RDF data, default=None means do not save to file
+        njobs : int
+            Number of CPUs to run on, default=1
 
         Returns
         -------
@@ -511,29 +513,29 @@ class EquilibriumAnalysis:
         
         '''
 
-        from MDAnalysis.analysis import rdf
+        from ParallelMDAnalysis import ParallelInterRDF as InterRDF
 
         nbins = int((range[1] - range[0]) / bin_width)
         self.rdfs = {}
 
         print('\nCalculating cation-water RDF...')
-        ci_w = rdf.InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
-        ci_w.run(step=step)
+        ci_w = InterRDF(self.cations, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
+        ci_w.run(step=step, njobs=njobs)
         self.rdfs['ci-w'] = ci_w.results
 
         print('\nCalculating anion-water RDF...')
-        ai_w = rdf.InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
-        ai_w.run(step=step)
+        ai_w = InterRDF(self.anions, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
+        ai_w.run(step=step, njobs=njobs)
         self.rdfs['ai-w'] = ai_w.results
 
         print('\nCalculating water-water RDF...')
-        w_w = rdf.InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
-        w_w.run(step=step)
+        w_w = InterRDF(self.waters, self.waters, nbins=nbins, range=range, norm='rdf', verbose=True)
+        w_w.run(step=step, njobs=njobs)
         self.rdfs['w-w'] = w_w.results
 
         print('\nCalculating cation-anion RDF...')
-        ci_ai = rdf.InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf', verbose=True)
-        ci_ai.run(step=step)
+        ci_ai = InterRDF(self.cations, self.anions, nbins=nbins, range=range, norm='rdf', verbose=True)
+        ci_ai.run(step=step, njobs=njobs)
         self.rdfs['ci-ai'] = ci_ai.results
 
         if filename is not None:
@@ -1491,7 +1493,6 @@ class UmbrellaAnalysis:
         # Step 4: Compute and output the FES
         print('Calculating the free energy surface...')
         fes = pymbar.FES(u_kln, N_k, verbose=False)
-        kde_params = {'bandwidth' : bw}
         d_n = pymbar.utils.kn_to_n(d_kn, N_k=N_k)
         if not error:
             fes.generate_fes(u_kn, d_n, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges})

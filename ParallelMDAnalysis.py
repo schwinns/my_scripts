@@ -41,6 +41,7 @@ import numpy as np
 from MDAnalysis import coordinates
 from MDAnalysis.core.groups import AtomGroup
 from MDAnalysis.lib.log import ProgressBar
+from MDAnalysis.analysis.base import Results
 
 from MDAnalysis.lib.util import blocks_of
 from MDAnalysis.lib import distances
@@ -217,7 +218,7 @@ class ParallelAnalysisBase(object):
             else:
                 n = njobs
 
-            print(f'Running InterRDF with {n} CPUs')
+            print(f'Running with {n} CPUs')
             frame_values = np.arange(len(self._trajectory[self.start:self.stop:self.step]))
 
             with Pool(n) as worker_pool:
@@ -310,6 +311,10 @@ class ParallelInterRDF(ParallelAnalysisBase):
         # Set the max range to filter the search radius
         self._maxrange = self.rdf_settings['range'][1]
 
+        # create a Results object to hold the results
+        self.results = Results()
+        self.results.bins = self.bins
+
 
     def _single_frame(self, frame_idx):
         self._frame_index = frame_idx
@@ -358,3 +363,4 @@ class ParallelInterRDF(ParallelAnalysisBase):
         rdf = self.count / (density * vol * self.n_frames)
 
         self.rdf = rdf
+        self.results.rdf = rdf

@@ -3,6 +3,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+import pickle
 
 import MDAnalysis as mda
 from MDAnalysis.analysis import distances
@@ -18,6 +19,10 @@ from tqdm import tqdm
 import time
 
 from linear_algebra import *
+
+def load_object(filename):
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
 
 def run(commands):
     '''Run commands with subprocess'''
@@ -1622,6 +1627,67 @@ class UmbrellaAnalysis:
             np.savetxt(filename, np.vstack([results.coordination_number, results.free_energy, results.error]).T, header='coordination number, free energy (kJ/mol), error (kJ/mol)')
 
         return results
+    
+
+    def calculate_area_FES(self, biased_ion, radius, n_bootstraps=0, cn_range=None, filename=None, **kwargs):
+        '''
+        Calculate the free energy surfaces in the coordination shell cross-sectional areas collective variable space
+
+        Parameters
+        ----------
+        biased_ion : str, MDAnalysis.AtomGroup
+            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
+        radius : float
+            Hydration shell cutoff for the ion (Angstroms)
+        n_bootstraps : int
+            Number of bootstraps for the uncertainty calculation, default=0
+        cn_range : array-like
+            Coordination number range to calculate the discrete free energoes, default=None means use the min and max observed
+        filename : str
+            Name of the file to save the discrete free energies
+
+        Returns
+        -------
+        results : MDAnalysis Results class with attributes `coordination_number`, `free_energy`, and `error`
+            Free energies for the discrete coordination numbers. If `n_bootstraps` is 0, all errors will be 0.
+
+        '''
+
+        if self._fes is None:
+            raise ValueError('Continuous coordination number free energy surface not found. Try `calculate_FES()` first')
+        
+        if self.universe is None:
+            raise ValueError('No underlying MDAnalysis.Universe. Try `create_Universe()` first')
+
+        # load in polyhedrons and remove extra frames
+        n_sims = len(self.colvars)
+        total_frames = self.universe.trajectory.n_frames
+        umb_frames = self.colvars[0].time.shape[0]
+        to_remove = np.arange(umb_frames, total_frames+1, umb_frames+1)
+
+        poly = load_object(filepath+'polyhedrons.pl')
+        area = np.delete(poly.areas, to_remove)
+
+        # if calculating error, get uncorrelated areas
+        N_k = umb._N_k
+        area_kn = area.reshape((n_sims, umb_frames))
+        for k in range(n_sims):
+            idx = umb.uncorrelated_indices[k]
+            area_kn[k, 0:N_k[k]] = area_kn[k, idx]
+
+        area = pymbar.utils.kn_to_n(area_kn, N_k=N_k)
+
+        bin_center_i = np.zeros([50])
+        bin_edges = np.linspace(15, 47, 50 + 1)
+        for i in range(50):
+            bin_center_i[i] = 0.5 * (bin_edges[i] + bin_edges[i + 1])
+
+        umb._fes.generate_fes(umb.u_kn, area, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges}, n_bootstraps=n_boots)
+        res = umb._fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method='bootstrap')
+        res['f_i'] = res['f_i']*umb.kT
+        res['df_i'] = res['df_i']*umb.kT
+
+        np.savetxt(filepath+'fes_areas.dat', np.vstack([bin_center_i, res['f_i'], res['df_i']]).T, header='max polyhedron area (Angstroms^2), free energy (kJ/mol), error (kJ/mol)')
 
 
     def show_overlap(self):
@@ -2045,6 +2111,8 @@ class UmbrellaAnalysis:
             result = np.asarray(result)
             results.areas = result[:,0]
             results.volumes = result[:,1]
+
+        self.polyhedron_sizes = results
 
         return results
 

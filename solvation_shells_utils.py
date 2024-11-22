@@ -8,6 +8,9 @@ import MDAnalysis as mda
 from MDAnalysis.analysis import distances
 from MDAnalysis.analysis.base import Results
 
+from scipy.spatial import ConvexHull
+from sklearn.decomposition import PCA
+
 import subprocess
 from textwrap import dedent
 from glob import glob
@@ -990,9 +993,6 @@ class EquilibriumAnalysis:
             Volumes and maximum cross-sectional areas for the polyhedrons for each ion, shape is len(ions)
         
         '''
-
-        from scipy.spatial import ConvexHull
-        from sklearn.decomposition import PCA
 
         # initialize the frame
         self.universe.trajectory[frame_idx]
@@ -2007,9 +2007,6 @@ class UmbrellaAnalysis:
         
         '''
 
-        from scipy.spatial import ConvexHull
-        from sklearn.decomposition import PCA
-
         if self.universe is None:
             raise ValueError('No underlying MDAnalysis.Universe. Try `create_Universe()` first')
 
@@ -2457,38 +2454,18 @@ class UmbrellaAnalysis:
         self.universe.trajectory[frame_idx]
 
         # Unwrap the shell and generate points on atomic spheres
-        if self.verbose:
-            print('-'*50)
-            start = time.perf_counter()
-            start_t = start
-
         shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
         pos = self._unwrap_shell(ion, r0)
         shell.positions = pos
         pos = self._points_on_atomic_radius(shell, n_points=200)
         center = ion.position
 
-        if self.verbose:
-            stop = time.perf_counter()
-            print(f'\nUnwrap shell, generate vdW points: {stop-start:.4f}')
-            start = stop
-
         # Create the polyhedron with a ConvexHull and save volume
         hull = ConvexHull(pos)
         volume = hull.volume
 
-        if self.verbose:
-            stop = time.perf_counter()
-            print(f'Create ConvexHull: {stop-start:.4f}')
-            start = stop
-
         # Get the major axis (first principal component)
         pca = PCA(n_components=3).fit(pos[hull.vertices])
-
-        if self.verbose:
-            stop = time.perf_counter()
-            print(f'Perform PCA: {stop-start:.4f}')
-            start = stop
 
         # Find all the edges of the convex hull
         edges = []
@@ -2502,17 +2479,9 @@ class UmbrellaAnalysis:
         t_values = np.linspace(-d.max()/2, d.max()/2, 100)
         center_line = np.array([center + t*pca.components_[0,:] for t in t_values])
 
-        if self.verbose:
-            stop = time.perf_counter()
-            print(f'Find edges, create principal axis: {stop-start:.4f}')
-            start = stop
-            iteration_times = []
-
         # Find the maximum cross-sectional area along the line through polyhedron
         area = 0
         for pt in center_line:
-            if self.verbose:
-                start_i = time.perf_counter()
 
             # Find the plane normal to the principal component
             A, B, C, D = create_plane_from_point_and_normal(pt, pca.components_[0,:])
@@ -2535,18 +2504,6 @@ class UmbrellaAnalysis:
                 if intersection_hull.volume > area:
                     saved_points = (pt, intersection_points, projected_points, mean_point)
                     area = intersection_hull.volume
-
-            if self.verbose:
-                stop_i = time.perf_counter()
-                iteration_times.append(stop_i-start_i)
-
-        if self.verbose:
-            stop = time.perf_counter()
-            stop_t = stop
-            print(f'Calculate areas along axis: {stop-start:.4f}')
-            print(f'\tAverage iteration: {np.mean(iteration_times):.4f}')
-            print(f'\nTotal time: {stop_t-start_t:.4f}')
-            print('-'*50)
 
         if for_visualization:
             return area, volume, saved_points
@@ -2605,22 +2562,21 @@ class UmbrellaAnalysis:
             Points on the "surface" of the atoms
         '''
 
-        positions = np.zeros((len(shell), n_points, 3))
-
-        for a,atom in enumerate(shell):
-            radius = self.vdW_radii[atom.element]
+        # get all radii
+        radii = np.array([self.vdW_radii[atom.element] for atom in shell])
             
-            # randomly sample theta and phi angles
-            rng = np.random.default_rng()
-            theta = np.arccos(rng.uniform(-1,1, n_points))
-            phi = rng.uniform(0,2*np.pi, n_points)
+        # randomly sample theta and phi angles
+        rng = np.random.default_rng()
+        theta = np.arccos(rng.uniform(-1,1, (len(shell),n_points)))
+        phi = rng.uniform(0,2*np.pi, (len(shell),n_points))
 
-            # convert to Cartesian coordinates
-            positions[a,:,0] = radius * np.sin(theta) * np.cos(phi) + atom.position[0]
-            positions[a,:,1] = radius * np.sin(theta) * np.sin(phi) + atom.position[1]
-            positions[a,:,2] = radius * np.cos(theta) + atom.position[2]
+        # convert to Cartesian coordinates
+        x = radii[:,None] * np.sin(theta) * np.cos(phi) + shell.positions[:,0,None]
+        y = radii[:,None] * np.sin(theta) * np.sin(phi) + shell.positions[:,1,None]
+        z = radii[:,None] * np.cos(theta) + shell.positions[:,2,None]
 
-        return np.reshape(positions, (len(shell)*n_points, 3))
+        positions = np.stack((x,y,z), axis=-1)
+        return positions.reshape(-1,3)
 
 
     def _get_spline_minima(self):

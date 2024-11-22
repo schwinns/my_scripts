@@ -34,7 +34,7 @@ if __name__ == '__main__':
     # Generate RDFs for cation-water, anion-water, water-water, and cation-anion
     if get_RDFs:
         print('Calculating RDFs...')
-        rdfs = eq.generate_rdfs(step=1, filename='rdfs.dat')
+        rdfs = eq.generate_rdfs(step=1, filename='rdfs.dat', njobs=16)
 
     # Calculate the fraction of shells present in the simulation
     if get_shell_probs:

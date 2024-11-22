@@ -12,6 +12,7 @@ import subprocess
 from textwrap import dedent
 from glob import glob
 from tqdm import tqdm
+import time
 
 from linear_algebra import *
 
@@ -1392,7 +1393,7 @@ class UmbrellaSim:
 
 class UmbrellaAnalysis:
 
-    def __init__(self, n_umbrellas, COLVAR_file='COLVAR_', start=10, stop=-1, by=100, T=300):
+    def __init__(self, n_umbrellas, COLVAR_file='COLVAR_', start=10, stop=-1, by=100, T=300, verbose=True):
         '''
         Initialize the umbrella sampling analysis object with collective variable files for each simulation
         
@@ -1410,6 +1411,8 @@ class UmbrellaAnalysis:
             Step by which to read COLVAR entries, default=100
         T : float
             Temperature (K), default=300
+        verbose : bool
+            Verbosity, controls whether to print detailed information and progress bars, default=True
 
         '''
 
@@ -1420,6 +1423,7 @@ class UmbrellaAnalysis:
         self._fes = None
         self.universe = None
         self.coordination_numbers = None
+        self.verbose = verbose
 
         # read in collective variable files
         self.colvars = []
@@ -2003,6 +2007,9 @@ class UmbrellaAnalysis:
         
         '''
 
+        from scipy.spatial import ConvexHull
+        from sklearn.decomposition import PCA
+
         if self.universe is None:
             raise ValueError('No underlying MDAnalysis.Universe. Try `create_Universe()` first')
 
@@ -2084,7 +2091,7 @@ class UmbrellaAnalysis:
         return self.universe
     
 
-    def get_coordination_numbers(self, biased_ion, radius, filename=None, njobs=1):
+    def get_coordination_numbers(self, biased_ion, radius, filename=None, njobs=1, verbose=None):
         '''
         Calculate the discrete total coordination number as a function of time for biased ion.
         
@@ -2099,6 +2106,8 @@ class UmbrellaAnalysis:
         njobs : int
             How many processors to run the calculation with, default=1. If greater than 1, use MDAnalysis
             OpenMP backend to calculate distances.
+        verbose : bool
+            Whether to show progress bar, default=None means use UmbrellaAnalysis settings
         
         Returns
         -------
@@ -2110,6 +2119,9 @@ class UmbrellaAnalysis:
         if self.universe is None:
             raise NameError('No universe data found. Try `create_Universe()` first')
         
+        if verbose is None:
+            verbose = self.verbose
+
         # make biased_ion into MDAnalysis AtomGroup
         if isinstance(biased_ion, str):
             ion = self.universe.select_atoms(biased_ion)
@@ -2123,8 +2135,12 @@ class UmbrellaAnalysis:
             # initialize coordination number as a function of time
             self.coordination_numbers = np.zeros(len(self.universe.trajectory))
 
-            for i,ts in tqdm(enumerate(self.universe.trajectory)):
-                self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='serial')
+            if verbose:
+                for i,ts in tqdm(enumerate(self.universe.trajectory)):
+                    self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='serial')
+            else:
+                for i,ts in enumerate(self.universe.trajectory):
+                    self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='serial')
 
         else: # run in parallel
 
@@ -2133,8 +2149,12 @@ class UmbrellaAnalysis:
             # initialize coordination number as a function of time
             self.coordination_numbers = np.zeros(len(self.universe.trajectory))
 
-            for i,ts in tqdm(enumerate(self.universe.trajectory)):
-                self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='OpenMP')
+            if verbose:
+                for i,ts in tqdm(enumerate(self.universe.trajectory)):
+                    self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='OpenMP')
+            else:
+                for i,ts in enumerate(self.universe.trajectory):
+                    self.coordination_numbers[i] = self._coordination_number_per_frame(i, ion, radius, backend='OpenMP')
 
         if filename is not None:
             df = pd.DataFrame()
@@ -2426,9 +2446,6 @@ class UmbrellaAnalysis:
             Volume and maximum cross-sectional area for the polyhedron
         
         '''
-
-        from scipy.spatial import ConvexHull
-        from sklearn.decomposition import PCA
     
         # make biased_ion into MDAnalysis AtomGroup
         if isinstance(biased_ion, str):
@@ -2440,18 +2457,38 @@ class UmbrellaAnalysis:
         self.universe.trajectory[frame_idx]
 
         # Unwrap the shell and generate points on atomic spheres
+        if self.verbose:
+            print('-'*50)
+            start = time.perf_counter()
+            start_t = start
+
         shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
         pos = self._unwrap_shell(ion, r0)
         shell.positions = pos
         pos = self._points_on_atomic_radius(shell, n_points=200)
         center = ion.position
 
+        if self.verbose:
+            stop = time.perf_counter()
+            print(f'\nUnwrap shell, generate vdW points: {stop-start:.4f}')
+            start = stop
+
         # Create the polyhedron with a ConvexHull and save volume
         hull = ConvexHull(pos)
         volume = hull.volume
 
+        if self.verbose:
+            stop = time.perf_counter()
+            print(f'Create ConvexHull: {stop-start:.4f}')
+            start = stop
+
         # Get the major axis (first principal component)
         pca = PCA(n_components=3).fit(pos[hull.vertices])
+
+        if self.verbose:
+            stop = time.perf_counter()
+            print(f'Perform PCA: {stop-start:.4f}')
+            start = stop
 
         # Find all the edges of the convex hull
         edges = []
@@ -2465,9 +2502,18 @@ class UmbrellaAnalysis:
         t_values = np.linspace(-d.max()/2, d.max()/2, 100)
         center_line = np.array([center + t*pca.components_[0,:] for t in t_values])
 
+        if self.verbose:
+            stop = time.perf_counter()
+            print(f'Find edges, create principal axis: {stop-start:.4f}')
+            start = stop
+            iteration_times = []
+
         # Find the maximum cross-sectional area along the line through polyhedron
         area = 0
         for pt in center_line:
+            if self.verbose:
+                start_i = time.perf_counter()
+
             # Find the plane normal to the principal component
             A, B, C, D = create_plane_from_point_and_normal(pt, pca.components_[0,:])
 
@@ -2489,6 +2535,18 @@ class UmbrellaAnalysis:
                 if intersection_hull.volume > area:
                     saved_points = (pt, intersection_points, projected_points, mean_point)
                     area = intersection_hull.volume
+
+            if self.verbose:
+                stop_i = time.perf_counter()
+                iteration_times.append(stop_i-start_i)
+
+        if self.verbose:
+            stop = time.perf_counter()
+            stop_t = stop
+            print(f'Calculate areas along axis: {stop-start:.4f}')
+            print(f'\tAverage iteration: {np.mean(iteration_times):.4f}')
+            print(f'\nTotal time: {stop_t-start_t:.4f}')
+            print('-'*50)
 
         if for_visualization:
             return area, volume, saved_points

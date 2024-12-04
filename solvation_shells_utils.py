@@ -10,6 +10,7 @@ from MDAnalysis.analysis import distances
 from MDAnalysis.analysis.base import Results
 
 from scipy.spatial import ConvexHull
+from scipy.signal import find_peaks
 from sklearn.decomposition import PCA
 
 import subprocess
@@ -461,14 +462,12 @@ class EquilibriumAnalysis:
     def _find_peaks_wrapper(self, bins, data, **kwargs):
         '''Wrapper for scipy.signal.find_peaks to use with SolvationAnalysis to find cutoff'''
         
-        from scipy.signal import find_peaks
-
         peaks, _  = find_peaks(-data, **kwargs)
         radii = bins[peaks[0]]
         return radii
     
 
-    def initialize_Solutes(self, step=1):
+    def initialize_Solutes(self, step=1, **kwargs):
         '''
         Initialize the Solute objects from SolvationAnalysis for the ions. Saves the solutes
         in attributes `solute_ci` (cation) and `solute_ai` (anion). 
@@ -477,23 +476,76 @@ class EquilibriumAnalysis:
         ----------
         step : int
             Trajectory step for which to run the Solute
-            
+        
         '''
 
         from solvation_analysis.solute import Solute
         
         self.solute_ci = Solute.from_atoms(self.cations, {'water' : self.waters, 'coion' : self.anions}, 
                                            solute_name='Cation', rdf_kernel=self._find_peaks_wrapper, 
-                                           kernel_kwargs={'distance':5})
+                                           kernel_kwargs={'distance':5}, **kwargs)
         self.solute_ai = Solute.from_atoms(self.anions, {'water' : self.waters, 'coion' : self.cations}, 
                                   solute_name='Anion', rdf_kernel=self._find_peaks_wrapper, 
-                                  kernel_kwargs={'distance':5})
+                                  kernel_kwargs={'distance':5}, **kwargs)
 
         self.solute_ci.run(step=step)
         self.solute_ai.run(step=step)
 
         print(f"\nHydration shell cutoff for cation-water = {self.solute_ci.radii['water']:.6f}")
         print(f"Hydration shell cutoff for anion-water = {self.solute_ai.radii['water']:.6f}")
+
+
+    def determine_ion_pairing_cutoffs(self, find_peaks_kwargs={'distance' : 5, 'height' : -1.1}, plot=True):
+        '''
+        Calculate the cation-anion radial distributions using SolvationAnalysis and identify the cutoffs for
+        ion pairing events. Should plot to ensure the cutoff regimes visually look correct, since these are 
+        sensitive to the peak detection algorithm. 
+
+        Parameters
+        ----------
+        find_peak_kwargs : dict
+            Keyword arguments for `scipy.find_peaks` used to find the first 3 minima in the cation-anion RDF,
+            default={'distance' : 5, 'height' : -1.1} worked well for NaCl at 0.6 M with OPC3 water
+        plot : bool
+            Whether to plot the RDF with the regions shaded, default=True
+
+        '''
+
+        try:
+            self.solute_ci
+        except NameError:
+            print('Solutes not initialized. Try `initialize_Solutes()` first')
+
+        r = self.solute_ci.rdf_data['Cation']['coion'][0]
+        rdf = self.solute_ci.rdf_data['Cation']['coion'][1]
+        mins, min_props = find_peaks(-rdf, **find_peaks_kwargs)
+
+        self.ion_pairs = Results()
+        self.ion_pairs['CIP'] = (0,r[mins[0]])
+        self.ion_pairs['SIP'] = (r[mins[0]],r[mins[1]])
+        self.ion_pairs['DSIP'] = (r[mins[1]],r[mins[2]])
+        self.ion_pairs['FI'] = (r[mins[2]],np.inf)
+
+        if plot:
+            fig, ax = plt.subplots(1,1)
+            ax.plot(r, rdf, color='k')
+
+            le = 2
+            for i,m in enumerate(mins[:3]):
+                ax.fill_betweenx(np.linspace(0,10), le, r[m], alpha=0.25)
+                ax.text((le+r[m]) / 2, 8, list(self.ion_pairs.keys())[i], ha='center')
+                le = r[m]
+
+            ax.fill_betweenx(np.linspace(0,10), le, 10, alpha=0.25)
+            ax.text((le+10) / 2, 8, list(self.ion_pairs.keys())[-1])
+            ax.set_xlabel('r ($\mathrm{\AA}$)')
+            ax.set_ylabel('g(r)')
+            ax.set_xlim(2,10)
+            ax.set_ylim(0,9)
+            fig.savefig('ion_pairing_cutoffs.png')
+            plt.show()
+
+        return self.ion_pairs
     
 
     def generate_rdfs(self, bin_width=0.05, range=(0,20), step=1, filename=None, njobs=1):
@@ -2116,6 +2168,83 @@ class UmbrellaAnalysis:
 
         return results
 
+
+    def ion_pairing(self, biased_ion, ion_pair_cutoffs, plot=False, njobs=1):
+        '''
+        Calculate the frequency of ion pairing events as defined in https://doi.org/10.1063/1.4901927 
+        over the umbrella trajectories. This method saves the time series of the ion pairing states for
+        the biased ion and returns the frequency distribution.
+
+        Parameters
+        ----------
+        biased_ion : str or MDAnalysis.AtomGroup
+            Biased ion in the simulation
+        ion_pair_cutoffs : dict or MDAnalysis.analysis.base.Results of tuples
+            Dictionary with keys ['CIP', 'SIP', 'DSIP', 'FI'] with values (min, max) for each region
+        plot : bool
+            Whether to plot the distribution, default=False
+        njobs : int
+            How many processors to run the calculation with, default=1. If greater than 1, use MDAnalysis
+            OpenMP backend to calculate distances.
+        
+        Returns
+        -------
+        freq : pandas.DataFrame
+            Distribution of ion pairing frequencies, sums to 1
+
+        '''
+
+        # make biased_ion into MDAnalysis AtomGroup
+        if isinstance(biased_ion, str):
+            ion = self.universe.select_atoms(biased_ion)
+        else:
+            ion = biased_ion
+
+        # check whether biased ion is cation or anion
+        if ion in self.cations:
+            coions = self.anions
+        elif ion in self.anions:
+            coions = self.cations
+        else:
+            raise ValueError(f'Biased ion {ion} does not belong to anions ({self.anions}) or cations ({self.cations}).')
+
+        if self.universe is None:
+            raise ValueError('No underlying MDAnalysis.Universe. Try `create_Universe()` first')
+
+        self.ion_pairs = Results()
+        self.ion_pairs['CIP'] = np.zeros(len(self.universe.trajectory))
+        self.ion_pairs['SIP'] = np.zeros(len(self.universe.trajectory))
+        self.ion_pairs['DSIP'] = np.zeros(len(self.universe.trajectory))
+        self.ion_pairs['FI'] = np.zeros(len(self.universe.trajectory))
+
+        # set backend depending on number of CPUs available
+        if njobs == 1:
+            backend = 'serial'
+        else:
+            backend = 'OpenMP'
+
+        # increment the state the biased ion is in
+        for i,ts in tqdm(enumerate(self.universe.trajectory)):
+            d = distances.distance_array(ion, coions, box=ts.dimensions, backend=backend)[0,:]
+            idx, dist = d.argmin(), d.min()
+            for ip,range in ion_pair_cutoffs.items():                
+                if range[0] <= dist <= range[1]:
+                    self.ion_pairs[ip][i] += 1
+                    break
+
+        # calculate the distribution from the time series
+        df = pd.DataFrame(self.ion_pairs.data)
+        freq = pd.DataFrame(df.sum() / len(self.universe.trajectory))
+
+        if plot:
+            freq.plot(kind='bar', legend=None)
+            plt.ylabel('Frequency')
+            plt.savefig('ion_pair_distribution.png')
+            plt.show()
+
+        return freq
+
+
     def create_Universe(self, top, traj=None, water='type OW', cation='resname NA', anion='resname CL'):
         '''
         Create an MDAnalysis Universe for the individual umbrella simulation.
@@ -2167,7 +2296,7 @@ class UmbrellaAnalysis:
         radius : float
             Hydration shell cutoff for the ion (Angstroms)
         filename : str
-            Name of the file to save the discrete coordination numbers, default=None means do not save
+            Name of the file to save the discrete coordination numbers, should be a csv file, default=None means do not save
         njobs : int
             How many processors to run the calculation with, default=1. If greater than 1, use MDAnalysis
             OpenMP backend to calculate distances.

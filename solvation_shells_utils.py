@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pickle
 
+import pymbar
+
 import MDAnalysis as mda
 from MDAnalysis.analysis import distances
 from MDAnalysis.analysis.base import Results
@@ -1480,6 +1482,7 @@ class UmbrellaAnalysis:
         self._fes = None
         self.universe = None
         self.coordination_numbers = None
+        self.polyhedron_sizes = None
         self.verbose = verbose
 
         # read in collective variable files
@@ -1534,8 +1537,6 @@ class UmbrellaAnalysis:
             FES along the coordination number in kJ/mol
 
         '''
-
-        import pymbar
 
         # Step 1: Subsample timeseries
         print('Subsampling timeseries...')
@@ -1611,8 +1612,6 @@ class UmbrellaAnalysis:
 
         '''
 
-        import pymbar
-
         if self._fes is None:
             raise ValueError('Continuous coordination number free energy surface not found. Try `calculate_FES()` first')
         
@@ -1681,22 +1680,20 @@ class UmbrellaAnalysis:
         return results
     
 
-    def calculate_area_FES(self, biased_ion, radius, n_bootstraps=0, cn_range=None, filename=None, **kwargs):
+    def calculate_area_FES(self, area_range=None, nbins=50, n_bootstraps=0, filename=None):
         '''
         Calculate the free energy surfaces in the coordination shell cross-sectional areas collective variable space
 
         Parameters
         ----------
-        biased_ion : str, MDAnalysis.AtomGroup
-            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
-        radius : float
-            Hydration shell cutoff for the ion (Angstroms)
+        area_range : array-like, shape (2,)
+            Min and max area values to calculate the FES, default=None means use the minimum and maximum areas from the timeseries
+        nbins : int
+            Number of bins for the FES histogram, default=50
         n_bootstraps : int
             Number of bootstraps for the uncertainty calculation, default=0
-        cn_range : array-like
-            Coordination number range to calculate the discrete free energoes, default=None means use the min and max observed
         filename : str
-            Name of the file to save the discrete free energies
+            Name of the file to save the FES in area, default=None means do not save
 
         Returns
         -------
@@ -1710,6 +1707,9 @@ class UmbrellaAnalysis:
         
         if self.universe is None:
             raise ValueError('No underlying MDAnalysis.Universe. Try `create_Universe()` first')
+        
+        if self.polyhedron_sizes is None:
+            raise ValueError('No polyhedron size data. Try  `polyhedron_size()` first')
 
         # load in polyhedrons and remove extra frames
         n_sims = len(self.colvars)
@@ -1717,30 +1717,38 @@ class UmbrellaAnalysis:
         umb_frames = self.colvars[0].time.shape[0]
         to_remove = np.arange(umb_frames, total_frames+1, umb_frames+1)
 
-        poly = load_object(filepath+'polyhedrons.pl')
+        poly = self.polyhedron_sizes
         area = np.delete(poly.areas, to_remove)
 
-        # if calculating error, get uncorrelated areas
-        N_k = umb._N_k
+        # get uncorrelated areas
+        N_k = self._N_k
         area_kn = area.reshape((n_sims, umb_frames))
         for k in range(n_sims):
-            idx = umb.uncorrelated_indices[k]
+            idx = self.uncorrelated_indices[k]
             area_kn[k, 0:N_k[k]] = area_kn[k, idx]
 
         area = pymbar.utils.kn_to_n(area_kn, N_k=N_k)
 
-        bin_center_i = np.zeros([50])
-        bin_edges = np.linspace(15, 47, 50 + 1)
-        for i in range(50):
+        if area_range is None:
+            area_range = (area.min(), area.max())
+
+        # bin the areas for the FES
+        bin_center_i = np.zeros([nbins])
+        bin_edges = np.linspace(area_range[0], area_range[1], nbins + 1)
+        for i in range(nbins):
             bin_center_i[i] = 0.5 * (bin_edges[i] + bin_edges[i + 1])
 
-        umb._fes.generate_fes(umb.u_kn, area, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges}, n_bootstraps=n_boots)
-        res = umb._fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method='bootstrap')
-        res['f_i'] = res['f_i']*umb.kT
-        res['df_i'] = res['df_i']*umb.kT
+        # generate the FES in area
+        self._fes.generate_fes(self.u_kn, area, fes_type='histogram', histogram_parameters={'bin_edges' : bin_edges}, n_bootstraps=n_bootstraps)
+        res = self._fes.get_fes(bin_center_i, reference_point='from-lowest', uncertainty_method='bootstrap')
+        res['f_i'] = res['f_i']*self.kT
+        res['df_i'] = res['df_i']*self.kT
 
-        np.savetxt(filepath+'fes_areas.dat', np.vstack([bin_center_i, res['f_i'], res['df_i']]).T, header='max polyhedron area (Angstroms^2), free energy (kJ/mol), error (kJ/mol)')
+        if filename is not None:
+            np.savetxt(filename, np.vstack([bin_center_i, res['f_i'], res['df_i']]).T, header='max polyhedron area (Angstroms^2), free energy (kJ/mol), error (kJ/mol)')
 
+        return bin_center_i, res['f_i'], res['df_i']
+    
 
     def show_overlap(self):
         '''
@@ -2112,7 +2120,7 @@ class UmbrellaAnalysis:
 
         Parameters
         ----------
-        biased_ion : str, MDAnalysis.AtomGroup
+        biased_ion : str, MDAnalysis.Atom
             Biased ion in the simulation to calculate polyhedrons for
         njobs : int
             How many processors to run the calculation with, default=1. If greater than 1, use multiprocessing to
@@ -2627,7 +2635,7 @@ class UmbrellaAnalysis:
         ----------
         frame_idx : int
             Index of the frame
-        biased_ion : str, MDAnalysis.AtomGroup
+        biased_ion : str, MDAnalysis.Atom
             Biased ion in the simulation to calculate polyhedrons for
         r0 : float
             Hydration shell cutoff for the biased ion in Angstroms, default=3.15
@@ -2641,9 +2649,9 @@ class UmbrellaAnalysis:
         
         '''
     
-        # make biased_ion into MDAnalysis AtomGroup
+        # make biased_ion into MDAnalysis Atom
         if isinstance(biased_ion, str):
-            ion = self.universe.select_atoms(biased_ion)
+            ion = self.universe.select_atoms(biased_ion)[0]
         else:
             ion = biased_ion
         

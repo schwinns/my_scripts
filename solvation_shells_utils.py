@@ -1062,16 +1062,11 @@ class EquilibriumAnalysis:
         for j,ion in enumerate(ions):
 
             # Unwrap the shell
-            shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index}) and (type OW)')
+            shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
             pos = self._unwrap_shell(ion, r0)
             shell.positions = pos
             pos = self._points_on_atomic_radius(shell, n_points=200)
             center = ion.position
-
-            if len(shell) < 4: # cannot create a polyhedron
-                volumes[j] = np.nan
-                areas[j] = np.nan
-                continue
 
             # Create the polyhedron with a ConvexHull and save volume
             hull = ConvexHull(pos)
@@ -1123,7 +1118,7 @@ class EquilibriumAnalysis:
 
     def _unwrap_shell(self, ion, r0):
         '''
-        Unwrap the hydration shell, so all coordinated waters are on the same side of the box as ion.
+        Unwrap the hydration shell, so all coordinated groups are on the same side of the box as ion.
 
         Parameters
         ----------
@@ -1135,28 +1130,22 @@ class EquilibriumAnalysis:
         Returns
         -------
         positions : np.ndarray
-            Unwrapped coordinated for the waters in the shell
+            Unwrapped coordinates for the shell
 
         '''
 
-        shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index}) and (type OW)')
-        
-        positions = np.zeros((len(shell), 3))
-        for w,water in enumerate(shell):
-            dist = ion.position - water.position
-            for d in range(3):
-                if np.abs(dist[d]) > ion.universe.dimensions[d]/2: # if distance is more than half the box
-                    if dist[d] < 0:
-                        positions[w,d] = water.position[d] - ion.universe.dimensions[d]
-                    else:
-                        positions[w,d] = water.position[d] + ion.universe.dimensions[d]
-                else:
-                    positions[w,d] = water.position[d]
+        dims = self.universe.dimensions
+        shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
+        dist = ion.position - shell.positions
 
-        return positions
+        correction = np.where(np.abs(dist) > dims[:3]/2, # check if beyond half-box distance
+                              np.sign(dist) * dims[:3],  # add or subtract box size based on sign of dist
+                              0)                         # otherwise, do not move
+
+        return shell.positions + correction
     
 
-    def _points_on_atomic_radius(self, shell, n_points=100):
+    def _points_on_atomic_radius(self, shell, n_points=200):
         '''
         Generate points on the "surface" of the atoms, so we have points that encompass the volume of the atoms.
 
@@ -1171,22 +1160,21 @@ class EquilibriumAnalysis:
             Points on the "surface" of the atoms
         '''
 
-        positions = np.zeros((len(shell), n_points, 3))
-
-        for a,atom in enumerate(shell):
-            radius = self.vdW_radii[atom.element]
+        # get all radii
+        radii = np.array([self.vdW_radii[atom.element] for atom in shell])
             
-            # randomly sample theta and phi angles
-            rng = np.random.default_rng()
-            theta = np.arccos(rng.uniform(-1,1, n_points))
-            phi = rng.uniform(0,2*np.pi, n_points)
+        # randomly sample theta and phi angles
+        rng = np.random.default_rng()
+        theta = np.arccos(rng.uniform(-1,1, (len(shell),n_points)))
+        phi = rng.uniform(0,2*np.pi, (len(shell),n_points))
 
-            # convert to Cartesian coordinates
-            positions[a,:,0] = radius * np.sin(theta) * np.cos(phi) + atom.position[0]
-            positions[a,:,1] = radius * np.sin(theta) * np.sin(phi) + atom.position[1]
-            positions[a,:,2] = radius * np.cos(theta) + atom.position[2]
+        # convert to Cartesian coordinates
+        x = radii[:,None] * np.sin(theta) * np.cos(phi) + shell.positions[:,0,None]
+        y = radii[:,None] * np.sin(theta) * np.sin(phi) + shell.positions[:,1,None]
+        z = radii[:,None] * np.cos(theta) + shell.positions[:,2,None]
 
-        return np.reshape(positions, (len(shell)*n_points, 3))
+        positions = np.stack((x,y,z), axis=-1)
+        return positions.reshape(-1,3)
 
 
 class MetaDAnalysis:
@@ -1523,7 +1511,8 @@ class UmbrellaAnalysis:
         bw : float
             Bandwidth for the KDE
         error : bool
-            Calculate error. If True and n_bootstraps > 0, then will calculate the bootstrapped error. Otherwise, calculates the analytical histogram error, default=True
+            Calculate error. If True and n_bootstraps > 0, then will calculate the bootstrapped error. 
+            Otherwise, calculates the analytical histogram error, default=True
         mintozero : bool
             Shift the minimum of the free energy surface to 0
         filename : str
@@ -2736,23 +2725,16 @@ class UmbrellaAnalysis:
 
         dims = self.universe.dimensions
         shell = self.universe.select_atoms(f'(sphzone {r0} index {ion.index})')
-        
-        positions = np.zeros((len(shell), 3))
-        for a,atom in enumerate(shell):
-            dist = ion.position - atom.position
-            for d in range(3):
-                if np.abs(dist[d]) > dims[d]/2: # if distance is more than half the box
-                    if dist[d] < 0:
-                        positions[a,d] = atom.position[d] - dims[d]
-                    else:
-                        positions[a,d] = atom.position[d] + dims[d]
-                else:
-                    positions[a,d] = atom.position[d]
+        dist = ion.position - shell.positions
 
-        return positions
+        correction = np.where(np.abs(dist) > dims[:3]/2, # check if beyond half-box distance
+                              np.sign(dist) * dims[:3],  # add or subtract box size based on sign of dist
+                              0)                         # otherwise, do not move
+
+        return shell.positions + correction
 
 
-    def _points_on_atomic_radius(self, shell, n_points=100):
+    def _points_on_atomic_radius(self, shell, n_points=200):
         '''
         Generate points on the "surface" of the atoms, so we have points that encompass the volume of the atoms.
 

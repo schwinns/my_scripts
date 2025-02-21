@@ -10,7 +10,7 @@ import subprocess
 class PolymAnalysis():
     def __init__(self, data_file, frmt='DATA', init_file='system.in.init', settings_file='cleanedsystem.in.settings', tpr_file=None, xlink_c='1', xlink_n='7', term_n='8', cl_type='6', oh_type='10', ow_type='11', hw_type='12'):
 
-        self.lmp = '22' # extension for the LAMMPS executable
+        self.lmp = '23' # extension for the LAMMPS executable
         self.gmx = 'gmx' # name of the GROMACS executable
 
         # Save information about original file
@@ -938,6 +938,75 @@ class PolymAnalysis():
                 print(f'Inserted ion near {O} after {i} kicks at position {pos}')
                 ion_pos.append(pos) 
                 self.atoms = self.atoms.subtract(my_waters.atoms) # remove the waters to be replaced
+
+        # reassign residue numbers after deleted waters
+        dims = self.universe.dimensions # save original dimensions
+        n_residues = len(self.atoms.residues)
+        resids = np.arange(1, n_residues+1)
+        self.universe = mda.Merge(self.atoms)
+        self.universe.add_TopologyAttr('resid', list(resids))
+
+        # create an empty universe for the newly placed ions
+        n_residues = len(self.atoms.residues)
+        ion_u = mda.Universe.empty(n_ions,
+                                   n_residues=n_ions,
+                                   atom_resindex=list(range(n_ions)),
+                                   trajectory=True)
+        
+        ion_u.add_TopologyAttr('name', [f'{ion_name}']*n_ions)
+        ion_u.add_TopologyAttr('type', [f'{ion_name}']*n_ions)
+        ion_u.add_TopologyAttr('resname', [f'{ion_name.upper()}']*n_ions)
+        ion_u.add_TopologyAttr('resid', list(np.arange(n_residues+1, n_residues+n_ions+1)))
+
+        ion_u.atoms.positions = np.array(ion_pos[:n_ions])
+
+        # merge with system universe, write to gro file
+        new_universe = mda.Merge(self.universe.atoms, ion_u.atoms)
+        new_universe.dimensions = dims
+        new_universe.atoms.write(output)
+
+        return n_ions, output, excess_charge
+
+
+    def random_insertion_in_membrane(self, PA_lims, ion_name='Na', ion_charge=1, extra_inserted=0, output='PA_ions.gro'):
+        '''Add ions randomly to the membrane by merging universe with ion universe'''
+
+        # locate COOH/COO- oxygens
+        c_group = self.universe.select_atoms('type c and not bonded type n')
+        deprot_o = []
+        prot_o = []
+        for c in c_group:
+            my_Os = [atom for atom in c.bonded_atoms if atom.type == 'o']
+            if len(my_Os) == 2:
+                deprot_o.append(my_Os[0]) # add one of the two O's to the AtomGroup
+            elif len(my_Os) == 1:
+                prot_o.append(my_Os[0]) # add the =O to the AtomGroup
+            else:
+                raise TypeError(f'{c} is not the carbon in R-COOH or R-COO-')
+        
+        # calculate excess charge from adding ions
+        polymer_charge = len(deprot_o)*-1
+        if len(deprot_o) % ion_charge > 0: # if we cannot exactly balance polymer charge with cations
+            n_ions = round(len(deprot_o) / ion_charge) + 1
+        else:
+            n_ions = len(deprot_o)
+
+        print(f'Polymer charge is {polymer_charge}')
+
+        n_ions += extra_inserted # add the extra inserted ions to total added ions count
+        counterion_charge = n_ions*ion_charge # calculate charge from added ions
+        excess_charge = counterion_charge + polymer_charge # calculate excess charge from polymer and added ions
+
+        print(f'Adding {n_ions} cations, which results in {excess_charge} excess charge in the system')
+
+        # find waters to replace with ions in the membrane (lower bound of PA + 5 to upper bound of PA - 5 to give a small buffer)
+        waters = self.universe.select_atoms(f'(type {self.ow_type}) and (prop z >= {PA_lims[0]+5} and prop z <= {PA_lims[1]-5})')
+        to_replace = self.atoms[np.random.choice(waters.indices, n_ions, replace=False)].residues
+        ion_pos = np.zeros((n_ions, 3))
+        for i in range(n_ions):
+            ion_pos[i] = to_replace[i].atoms.center_of_mass()
+
+        self.atoms = self.atoms.subtract(to_replace.atoms) # remove the waters to be replaced
 
         # reassign residue numbers after deleted waters
         dims = self.universe.dimensions # save original dimensions

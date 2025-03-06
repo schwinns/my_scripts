@@ -1035,6 +1035,106 @@ class PolymAnalysis():
         new_universe.atoms.write(output)
 
         return n_ions, output, excess_charge
+    
+
+    def pair_insertion_in_membrane(self, cation_name='Na', anion_name='Cl', cation_charge=1, extra_inserted=0, output='PA_ions.gro'):
+        '''Add ions to the membrane by merging universe with ion universe'''
+
+        from MDAnalysis.analysis import distances
+
+        # locate COOH/COO- oxygens
+        c_group = self.universe.select_atoms('type c and not bonded type n')
+        deprot_o = []
+        prot_o = []
+        for c in c_group:
+            my_Os = [atom for atom in c.bonded_atoms if atom.type == 'o']
+            if len(my_Os) == 2:
+                deprot_o.append(my_Os[0]) # add one of the two O's to the AtomGroup
+            elif len(my_Os) == 1:
+                prot_o.append(my_Os[0]) # add the =O to the AtomGroup
+            else:
+                raise TypeError(f'{c} is not the carbon in R-COOH or R-COO-')
+        
+        # calculate excess charge from adding ions
+        polymer_charge = len(deprot_o)*-1
+        if len(deprot_o) % cation_charge > 0: # if we cannot exactly balance polymer charge with cations
+            n_ions = round(len(deprot_o) / cation_charge) + 1
+        else:
+            n_ions = len(deprot_o)
+
+        print(f'Polymer charge is {polymer_charge}')
+
+        n_ions += extra_inserted # add the extra inserted ions to total added ions count
+        counterion_charge = n_ions*cation_charge # calculate charge from added ions
+        excess_charge = polymer_charge # excess charge is the polymer charge since adding balanced ion pairs
+
+        print(f'Adding {n_ions} ion pairs, which results in {excess_charge} excess charge in the system')
+
+        # select which O's to place ions near
+        print('WARNING: currently the only insertion algorithm is R-COOH groups with at least 2 water within 5 Angstroms')
+
+        prot_idx = []
+        for i,O in enumerate(prot_o):
+            my_waters = self.universe.select_atoms(f'(type {self.ow_type}) and (sphzone 5 index {O.index})')
+            if len(my_waters) > 1:
+                prot_idx.append(i)
+
+        if len(prot_idx) < extra_inserted:
+            raise TypeError('Not enough R-COOH groups with waters')
+
+        tmp = np.array(prot_o)
+        o_group = mda.AtomGroup(deprot_o + tmp[prot_idx].tolist()) # select all deprotonated groups and extra_inserted random protonated groups
+
+        # delete waters and find where to place ions
+        cation_positions = []
+        anion_positions = []
+        to_replace = []
+        for O in o_group:
+            my_id = O.index
+            my_waters = self.atoms.select_atoms(f'(type {self.ow_type}) and (sphzone 5 index {my_id})') # select waters within 5 Angstroms
+            if len(my_waters) > 1:
+
+                (idx1,idx2) = np.random.choice(my_waters.indices, 2, replace=False) # randomly select waters to replace
+                to_replace.append(idx1)
+                to_replace.append(idx2)
+                ci_pos = self.atoms[idx1].position # place cation at the an OW for one of the waters
+                ai_pos = self.atoms[idx2].position # place anion at the other water
+
+                print(f'Placing cation at {self.atoms[idx1]} and anion at {self.atoms[idx2]} by oxygen {O}')
+                print(f'Distance between O and cation: {distances.distance_array(ci_pos,O.position, box=self.universe.dimensions)[0,0]:.4f}')
+                print(f'Distance between O and anion: {distances.distance_array(ai_pos,O.position, box=self.universe.dimensions)[0,0]:.4f}\n')
+                cation_positions.append(ci_pos)
+                anion_positions.append(ai_pos)
+                
+        self.atoms = self.atoms.subtract(self.atoms[np.array(to_replace)].residues.atoms) # remove the waters to be replaced
+        
+        # reassign residue numbers after deleted waters
+        dims = self.universe.dimensions # save original dimensions
+        n_residues = len(self.atoms.residues)
+        resids = np.arange(1, n_residues+1)
+        self.universe = mda.Merge(self.atoms)
+        self.universe.add_TopologyAttr('resid', list(resids))
+
+        # create an empty universe for the newly placed ions
+        n_residues = len(self.atoms.residues)
+        ion_u = mda.Universe.empty(n_ions*2,
+                                n_residues=n_ions*2,
+                                atom_resindex=list(range(n_ions*2)),
+                                trajectory=True)
+
+        ion_u.add_TopologyAttr('name', [f'{cation_name}']*n_ions+[f'{anion_name}']*n_ions)
+        ion_u.add_TopologyAttr('type', [f'{cation_name}']*n_ions+[f'{anion_name}']*n_ions)
+        ion_u.add_TopologyAttr('resname', [f'{cation_name.upper()}']*n_ions+[f'{anion_name.upper()}']*n_ions)
+        ion_u.add_TopologyAttr('resid', list(np.arange(n_residues+1, n_residues+n_ions*2+1)))
+
+        ion_u.atoms.positions = np.array(cation_positions[:n_ions] + anion_positions[:n_ions])
+
+        # merge with system universe, write to gro file
+        new_universe = mda.Merge(self.universe.atoms, ion_u.atoms)
+        new_universe.dimensions = dims
+        new_universe.atoms.write(output)
+
+        return n_ions, output, excess_charge
 
 
     def insert_ions(self, n_anions=0, anion_name=None, anion_charge=-1, n_cations=0, cation_name=None, cation_charge=1, top='PA_ions.top', output='PA_ions.gro', water_sel=18):

@@ -1037,7 +1037,7 @@ class PolymAnalysis():
         return n_ions, output, excess_charge
     
 
-    def pair_insertion_in_membrane(self, cation_name='Na', anion_name='Cl', cation_charge=1, extra_inserted=0, output='PA_ions.gro'):
+    def pair_insertion_in_membrane(self, cation_name='Na', anion_name='Cl', cation_charge=1, extra_inserted=0, tol=2, output='PA_ions.gro'):
         '''Add ions to the membrane by merging universe with ion universe'''
 
         from MDAnalysis.analysis import distances
@@ -1101,11 +1101,52 @@ class PolymAnalysis():
                 ai_pos = self.atoms[idx2].position # place anion at the other water
 
                 print(f'Placing cation at {self.atoms[idx1]} and anion at {self.atoms[idx2]} by oxygen {O}')
-                print(f'Distance between O and cation: {distances.distance_array(ci_pos,O.position, box=self.universe.dimensions)[0,0]:.4f}')
-                print(f'Distance between O and anion: {distances.distance_array(ai_pos,O.position, box=self.universe.dimensions)[0,0]:.4f}\n')
-                cation_positions.append(ci_pos)
-                anion_positions.append(ai_pos)
-                
+
+        too_close_ci = self.universe.select_atoms(f'point {ci_pos[0]} {ci_pos[1]} {ci_pos[2]} {tol}') - self.atoms[idx1].residue.atoms - self.atoms[idx2].residue.atoms
+        too_close_ai = self.universe.select_atoms(f'point {ai_pos[0]} {ai_pos[1]} {ai_pos[2]} {tol}') - self.atoms[idx1].residue.atoms - self.atoms[idx2].residue.atoms
+        n_close = len(too_close_ai) + len(too_close_ci)
+
+        ci_ai_dist = distances.distance_array(ci_pos, ai_pos, box=self.universe.dimensions)
+        if ci_ai_dist < tol:
+            n_close += 1
+
+        # kick the ions around until ions are within tolerance (i.e. not within tol Angstroms from other atoms)
+        i = 0
+        while n_close > 0:
+            if len(too_close_ci) > 0:
+                kick_vec = np.random.uniform(-1,1, size=3) # random direction for kick
+                kick_vec = kick_vec / np.linalg.norm(kick_vec) 
+                kick_strength = np.random.uniform(0,0.1) # kick is between 0 and 0.1 Angstroms
+                ci_pos += kick_strength*kick_vec
+
+            if len(too_close_ai) > 0:
+                kick_vec = np.random.uniform(-1,1, size=3) # random direction for kick
+                kick_vec = kick_vec / np.linalg.norm(kick_vec) 
+                kick_strength = np.random.uniform(0,0.1) # kick is between 0 and 0.1 Angstroms
+                ai_pos += kick_strength*kick_vec
+
+            too_close_ci = self.universe.select_atoms(f'point {ci_pos[0]} {ci_pos[1]} {ci_pos[2]} {tol}') - self.atoms[idx1].residue.atoms - self.atoms[idx2].residue.atoms
+            too_close_ai = self.universe.select_atoms(f'point {ai_pos[0]} {ai_pos[1]} {ai_pos[2]} {tol}') - self.atoms[idx1].residue.atoms - self.atoms[idx2].residue.atoms
+            n_close = len(too_close_ai) + len(too_close_ci)
+
+            # do not let cation and anion overlap either
+            ci_ai_dist = distances.distance_array(ci_pos, ai_pos, box=self.universe.dimensions)
+            if ci_ai_dist < tol:
+                n_close += 1
+
+            i += 1
+            if i == 10_000:
+                print(f'failed on {O} with {n_close} atoms too close')
+                [print(f'\t{a}') for a in too_close]
+                break
+
+        cation_positions.append(ci_pos)
+        anion_positions.append(ai_pos)
+        print(f'Placed ion pair after {i} iterations:')
+        print(f'\tDistance between O and cation: {distances.distance_array(ci_pos,O.position, box=self.universe.dimensions)[0,0]:.4f}')
+        print(f'\tDistance between O and anion: {distances.distance_array(ai_pos,O.position, box=self.universe.dimensions)[0,0]:.4f}')
+        print(f'\tDistance between cation and anion: {distances.distance_array(ci_pos,ai_pos, box=self.universe.dimensions)[0,0]:.4f}\n')
+
         self.atoms = self.atoms.subtract(self.atoms[np.array(to_replace)].residues.atoms) # remove the waters to be replaced
         
         # reassign residue numbers after deleted waters

@@ -55,7 +55,7 @@ class IonDynamics:
         self.ions = self.cations + self.anions
 
         for ag in (self.polymer, self.waters, self.cations, self.anions):
-            print(f'{ag[0].resname} group has {len(ag)} atoms')
+            print(f'\t{ag[0].resname} group has {len(ag)} atoms')
 
         # initialize some useful variables
         self.n_frames = self.universe.trajectory.n_frames

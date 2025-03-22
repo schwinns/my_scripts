@@ -69,6 +69,7 @@ class IonDynamics:
             self.njobs = njobs
 
         if transform:
+            self.universe.trajectory[0]
             workflow = [
                 trans.unwrap(self.universe.atoms),
                 trans.center_in_box(self.polymer, center='mass'),

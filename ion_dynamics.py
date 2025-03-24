@@ -169,6 +169,71 @@ class IonDynamics:
                 w.write(atom_group)
 
 
+    def density_profile(self, frame, atom_groups, bins=None, bin_width=0.5, dim='z', method='atom'):
+        '''
+        Calculate the partial density across the box for a given atom group
+        
+        Parameters
+        ----------
+        frame : int
+            Frame of the trajectory
+        atom_groups : list of MDAnalysis AtomGroups
+            List of AtomGroups to calculate the density profile for
+        bins : np.ndarray, optional
+            Bins to use for the density profile. Default = None, which means bins will be created
+            based on the bin_width
+        bin_width : float, optional
+            Width of the bins for the density profile. Default = 0.5 Angstroms
+        dim : str, optional
+            Dimension to calculate the density profile. Default = 'z'
+        method : str, optional
+            Method to calculate the density profile. Options are 'atom', 'molecule', 'mass', and 'charge'. 
+            Default = 'atom' gives the number of atoms in each bin. 'molecule' gives the number of molecules in
+            each bin. 'mass' gives the mass density in each bin. 'charge' gives the charge density in each bin.
+
+        Returns
+        -------
+        bin_centers : np.ndarray
+            Array of bin centers, shape (n_bins,)
+        counts : np.ndarray
+            Array of counts per bin, shape (n_bins, n_atom_groups)
+
+        '''
+
+        self.universe.trajectory[frame]
+
+        dims = {'x': 0, 'y': 1, 'z': 2}
+        d = dims[dim]
+        box = self.universe.dimensions
+
+        if bins is None:
+            n_bins = int(box[d] / bin_width)
+            bins = np.linspace(0, box[d], num=n_bins)
+        else:
+            n_bins = len(bins)
+
+        counts = np.zeros((n_bins-1, len(atom_groups)))
+        
+        for b in range(n_bins-1):
+            lb = bins[b]
+            ub = bins[b+1]
+            for ag,atom_group in enumerate(atom_groups):
+                bin_atoms = atom_group.select_atoms(f'(prop {dim} >= {lb}) and (prop {dim} <= {ub})')
+                if method == 'atom':
+                    counts[b,ag] += len(bin_atoms)
+                elif method == 'molecule': 
+                    counts[b,ag] += bin_atoms.n_residues
+                elif method == 'mass':
+                    dV = box[0] * box[1] * (ub-lb) * (10**-8)**3 # volume in cm^3
+                    mass = bin_atoms.masses.sum() / 6.022 / 10**23
+                    counts[b,ag] += mass / dV
+                elif method == 'charge':
+                    counts[b,ag] += bin_atoms.charges.sum()
+
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        return bin_centers, counts
+
+
     def plot_membrane(self, frame=None, cation_color='blue', anion_color='limegreen', 
                       ydim='x', show_ions=True, show_zones=False, ax=None):
         '''

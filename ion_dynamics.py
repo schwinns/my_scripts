@@ -119,8 +119,9 @@ class IonDynamics:
 
         # initialize some useful variables
         self.n_frames = self.universe.trajectory.n_frames
-        self.dt = self.universe.trajectory[1].time - self.universe.trajectory[0].time # timestep
+        self.dt = self.universe.trajectory[1].time - self.universe.trajectory[0].time # timestep (ps)
         self.time = np.arange(self.universe.trajectory[0].time, self.universe.trajectory[-1].time+self.dt, self.dt)
+        self.state_sequence = None
 
         # set up the trajectory transformations
         if njobs == -1:
@@ -138,6 +139,14 @@ class IonDynamics:
                 ]
             self.universe.trajectory.add_transformations(*workflow)
 
+    
+    def __str__(self):
+        return f'<IonDynamics object with {self.cations.n_atoms} cations and {self.anions.n_atoms} anions over {self.dt*self.n_frames/1000} ns>'
+
+
+    def __repr__(self):
+        return self.__str__()
+        
 
     def extract_ion_trajectories(self, ions, filename='ion_trajectories.csv'):
         '''
@@ -162,19 +171,19 @@ class IonDynamics:
         traj = self._trajectory_to_numpy(ions)
 
         # pick only ions that are within the middle 50% of the polymer throughout the simulation
-        membrane_ions = {}
+        self.membrane_ions = {}
         for a, atom in enumerate(ions):
             below_ub = (traj[:,a,2] >= self.membrane_bounds[:,1]).all()
             above_lb = (traj[:,a,2] <= self.membrane_bounds[:,3]).all()
             if below_ub and above_lb:
-                membrane_ions[atom.index] = traj[:,a,:]
+                self.membrane_ions[atom.index] = traj[:,a,:]
 
         # save as a pd.DataFrame and save as csv
-        data = [(ion_id, *coord) for ion_id, coords in membrane_ions.items() for coord in coords]
+        data = [(ion_id, *coord) for ion_id, coords in self.membrane_ions.items() for coord in coords]
         self.ion_trajectories = pd.DataFrame(data, columns=['ion_index', 'x', 'y', 'z'])
         
         ion_types = []
-        for idx in membrane_ions:
+        for idx in self.membrane_ions:
             ion = self.universe.select_atoms(f'index {idx}')[0]
             [ion_types.append(t) for t in [ion.type]*self.n_frames]
 
@@ -184,33 +193,9 @@ class IonDynamics:
         return self.ion_trajectories
 
 
-    def get_membrane_ions(self, frame):
+    def write_xtc(self, filename, atom_group=None, frames=None):
         '''
-        For a given frame, get the atoms within the "bulk" membrane, i.e. select the ions within the center 50%
-        of the polymer as determined by the geometric polymer zones.
-
-        Parameters
-        ----------
-        frame : int
-            Frame of the trajectory
-
-        Returns
-        -------
-            membrane_ions : MDAnalysis AtomGroup
-                AtomGroup with the ions that are in the membrane
-
-        '''
-
-        self.universe.trajectory[frame]
-
-        lb, ub = self.polymer_zones[1], self.polymer_zones[3]
-        membrane_ions = self.ions.select_atoms(f'(prop z >= {lb}) and (prop z <= {ub})')
-        return membrane_ions
-
-
-    def write_xtc(self, filename, atom_group=None):
-        '''
-        Write a centered and NoJump xtc file with MD trajectory
+        Write an xtc file with MD trajectory
 
         Parameters
         ----------
@@ -218,15 +203,90 @@ class IonDynamics:
             Name of the output xtc file
         atom_group : MDAnalysis AtomGroup, optional
             Atom group to write to xtc. Default = None, means use all atoms.
+        frames : array-like, optional
+            Frames to write to the xtc file. Default = None, means write all frames.
 
         '''
 
         if atom_group is None:
             atom_group = self.universe.atoms
 
+        if frames is None:
+            frames = np.arange(self.n_frames)
+
         with mda.Writer(filename, atom_group.n_atoms) as w:
-            for ts in tqdm(self.universe.trajectory):
+            for ts in tqdm(self.universe.trajectory[frames]):
                 w.write(atom_group)
+
+
+    def write_gro(self, filename, atom_group=None):
+        '''
+        Write a gro file with the coordinates of the atom group
+
+        Parameters
+        ----------
+        filename : str
+            Name of the output gro file
+        atom_group : MDAnalysis AtomGroup, optional
+            Atom group to write to gro. Default = None, means use all atoms.
+
+        '''
+
+        if atom_group is None:
+            atom_group = self.universe.atoms
+
+        atom_group.write(filename)
+
+
+    def load_state_sequence(self, state_sequence, molecules=None):
+        '''
+        Load the state sequence that was output from the HDP-AR-HMM. Saved as an attribute `self.state_sequence`
+        in the format {molecule_index: state_sequence}. Creates attributes `self.unique_states` (dict) that contains 
+        the unique states for each molecule, `self.found_states` (np.ndarray) that contains all the states identified, 
+        and `self.n_states` (int) with the number of `found_states`.
+
+        Parameters
+        ----------
+        state_sequence : np.ndarray
+            State sequence, shape (n_frames,n_molecules). This can be directly loaded from hdphmm.hdphmm.InifiniteHMM.z.T,
+            i.e. the transpose of the state matrix.
+        molecules : array-like or MDAnalysis AtomGroup
+            Molecules to which the state sequence corresponds. This should be the same as the number of columns in
+            `state_sequence`. This can be a list of molecule indices or an MDAnalysis AtomGroup with the same number
+            of atoms as the number of columns in `state_sequence`. If a list of indices, the indices should be
+            the same as the indices in the MDAnalysis Universe. Default = None, which means the state sequence
+            corresponds to the cations in the MDAnalysis Universe.
+
+        Returns
+        -------
+        state_sequence : dict
+            State sequences for each molecule. The keys are the indices of the molecules in the MDAnalysis Universe 
+            and the values are the state sequences for each molecule. The shape of each state sequence is (n_frames,).
+        
+        '''
+
+        # set default molecules to cations
+        if molecules is None:
+            molecules = self.cations.indices
+
+        self.state_sequence = {}
+        self.unique_states = {}
+
+        for i,molecule in enumerate(molecules):
+            if isinstance(molecule, mda.AtomGroup):
+                molecule = molecule.index
+            elif isinstance(molecule, (int, np.integer)):
+                pass
+            else:
+                raise ValueError(f'molecules must be a list of indices or an MDAnalysis AtomGroup but received {type(molecule)}')
+
+            self.state_sequence[molecule] = state_sequence[:,i]
+            self.unique_states[molecule] = np.unique(state_sequence[:,i])
+
+        self.found_states = np.unique(state_sequence)
+        self.n_states = len(self.found_states)
+        return self.state_sequence
+
 
 
     def density_profile(self, frame, atom_groups, bins=None, bin_width=0.5, dim='z', method='atom'):
@@ -358,6 +418,61 @@ class IonDynamics:
         return ax
     
 
+    def rdfs_by_state(self, bin_width=0.05, range=(0,20)):
+        '''
+        Calculate radial distribution functions for each state. This method calculates the RDFs for
+        cation-water, cation-cation, cation-anion, cation-C=O, cation-COOH, cation-COO-, cation-amideO, cation-NH2
+        using my ParallelInterRDF built on MDAnalysis InterRDF. It saves the data in a dictionary attribute `rdfs`
+        with keys for each state. Each state then corresponds to a dictionary of with the RDF types above. 
+        
+        Parameters
+        ----------
+        ion : str, MDAnalysis.AtomGroup
+            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
+        bin_width : float
+            Width of the bins for the RDFs, default=0.05
+        range : array-like
+            Range over which to calculate the RDF, default=(0,20)
+
+        Returns
+        -------
+        rdfs : dict
+            Dictionary of dictionaries with the results for each state. The keys are the states and the values
+            are dictionaries with the RDF types. The keys of the inner dictionaries are the RDF types and the values
+            are the RDF results.
+        
+        '''
+
+        if self.state_sequence is None:
+            raise ValueError('No state sequence loaded. Please load a state sequence first.')
+        
+        nbins = int((range[1] - range[0]) / bin_width)
+        
+        # initialize the dictionary to hold the results
+        self.rdfs = {}
+        for state in self.found_states:
+            self.rdfs[state] = {'i-w': {}, 'i-i': {}, 'i-ci': {}}
+
+        for CN in CN_range:
+            idx = self.coordination_numbers == CN
+            print(f'Coordination number {CN}: {idx.sum()} frames')
+
+            if idx.sum() > 0:
+                i_w = rdf.InterRDF(ion, self.waters, nbins=nbins, range=range, norm='rdf')
+                i_w.run(frames=idx)
+                self.rdfs['i-w'][CN] = i_w.results
+
+                i_i = rdf.InterRDF(ion, ions, nbins=nbins, range=range, norm='rdf')
+                i_i.run(frames=idx)
+                self.rdfs['i-i'][CN] = i_i.results
+
+                i_ci = rdf.InterRDF(ion, coions, nbins=nbins, range=range, norm='rdf')
+                i_ci.run(frames=idx)
+                self.rdfs['i-ci'][CN] = i_ci.results
+
+        return self.rdfs
+
+    
     def plot_xyz_trajectories(self, x, y, z, c=None, c_label='time (ns)', ax=None, **lc_kwargs):
         '''
         Plot x, y, and z trajectories as a time series colored by a separate variable c

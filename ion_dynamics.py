@@ -10,6 +10,7 @@ from tqdm import tqdm
 import warnings
 
 import MDAnalysis as mda
+from MDAnalysis.analysis.rdf import InterRDF
 import MDAnalysis.transformations as trans
 
 import multiprocessing
@@ -238,7 +239,7 @@ class IonDynamics:
         atom_group.write(filename)
 
 
-    def load_state_sequence(self, state_sequence, molecules=None):
+    def load_state_sequence(self, state_sequence, molecules):
         '''
         Load the state sequence that was output from the HDP-AR-HMM. Saved as an attribute `self.state_sequence`
         in the format {molecule_index: state_sequence}. Creates attributes `self.unique_states` (dict) that contains 
@@ -254,8 +255,7 @@ class IonDynamics:
             Molecules to which the state sequence corresponds. This should be the same as the number of columns in
             `state_sequence`. This can be a list of molecule indices or an MDAnalysis AtomGroup with the same number
             of atoms as the number of columns in `state_sequence`. If a list of indices, the indices should be
-            the same as the indices in the MDAnalysis Universe. Default = None, which means the state sequence
-            corresponds to the cations in the MDAnalysis Universe.
+            the same as the indices in the MDAnalysis Universe.
 
         Returns
         -------
@@ -265,10 +265,10 @@ class IonDynamics:
         
         '''
 
-        # set default molecules to cations
-        if molecules is None:
-            molecules = self.cations.indices
+        if len(molecules) != state_sequence.shape[1]:
+            raise ValueError(f'Number of molecules ({len(molecules)}) does not match the number of columns in state_sequence ({state_sequence.shape[1]})')
 
+        self._state_sequnce_array = state_sequence
         self.state_sequence = {}
         self.unique_states = {}
 
@@ -286,7 +286,6 @@ class IonDynamics:
         self.found_states = np.unique(state_sequence)
         self.n_states = len(self.found_states)
         return self.state_sequence
-
 
 
     def density_profile(self, frame, atom_groups, bins=None, bin_width=0.5, dim='z', method='atom'):
@@ -418,17 +417,17 @@ class IonDynamics:
         return ax
     
 
-    def rdfs_by_state(self, bin_width=0.05, range=(0,20)):
+    def rdfs_by_state(self, ion, bin_width=0.05, range=(0,20)):
         '''
-        Calculate radial distribution functions for each state. This method calculates the RDFs for
-        cation-water, cation-cation, cation-anion, cation-C=O, cation-COOH, cation-COO-, cation-amideO, cation-NH2
-        using my ParallelInterRDF built on MDAnalysis InterRDF. It saves the data in a dictionary attribute `rdfs`
-        with keys for each state. Each state then corresponds to a dictionary of with the RDF types above. 
+        Calculate radial distribution functions for each state for `ion`. This method calculates the RDFs for
+        cation-water, cation-cation, cation-anion, cation-COOH, cation-COO-, cation-amideO, and cation-NH2
+        using MDAnalysis InterRDF. It saves the data in a dictionary attribute `rdfs` with keys for each state. 
+        Each state then corresponds to a dictionary of with the RDF types above. 
         
         Parameters
         ----------
-        ion : str, MDAnalysis.AtomGroup
-            Either selection language for the biased ion or an MDAnalysis AtomGroup of the biased ion
+        ion : int, MDAnalysis Atom
+            Either index of the ion or an MDAnalysis Atom of the ion
         bin_width : float
             Width of the bins for the RDFs, default=0.05
         range : array-like
@@ -443,32 +442,47 @@ class IonDynamics:
         
         '''
 
+        # check for state sequence and proper types
         if self.state_sequence is None:
             raise ValueError('No state sequence loaded. Please load a state sequence first.')
+
+        if isinstance(ion, mda.Atom):
+                ion = ion.index
+        elif isinstance(molecule, (int, np.integer)):
+            pass
+        else:
+            raise ValueError(f'ion must be an index or an MDAnalysis Atom but received {type(ion)}')
         
+        # initialize bins and selections
         nbins = int((range[1] - range[0]) / bin_width)
+
+        xlink = self.universe.select_atoms(f'(type c) and (bonded type n)')
+        cooh_C = self.universe.select_atoms(f'(type c) and (bonded type oh)')
+        cooh_OH = self.universe.select_atoms(f'(type oh)')
+        amideO = self.universe.select_atoms(f'(type o) and (bonded group xlink)', xlink=xlink)
+        coo = self.universe.select_atoms(f'(type o) and (not bonded group cooh_C) and (not bonded group xlink)', cooh_C=cooh_C, xlink=xlink)
+        nh2 = self.universe.select_atoms(f'(type nh)')
+        waters = self.waters.select_atoms(f'(type OW)')
+
+        # prepare the selections and their labels
+        selections = [waters, self.cations, self.anions, cooh_OH, 
+                      coo, amideO, nh2]
+        rdf_types = ['cation-water', 'cation-cation', 'cation-anion', 'cation-COOH', 
+                     'cation-COO-', 'cation-amideO', 'cation-NH2']
         
-        # initialize the dictionary to hold the results
-        self.rdfs = {}
+        # generate the RDF data
+        rdfs = {}
         for state in self.found_states:
-            self.rdfs[state] = {'i-w': {}, 'i-i': {}, 'i-ci': {}}
+            idx = np.where(self.state_sequence[ion] == state)[0]
+            print(f'Calculating RDFs for state {state} ({len(idx)} frames)')
+            rdfs[state] = {}
+            for l,label in enumerate(rdf_types):
+                rdf = InterRDF(self.universe.select_atoms(f'index {ion}'), 
+                               selections[l], 
+                               range=range, norm='rdf', verbose=True)
+                rdf.run(frames=idx)
+                rdfs[state][label] = rdf.results
 
-        for CN in CN_range:
-            idx = self.coordination_numbers == CN
-            print(f'Coordination number {CN}: {idx.sum()} frames')
-
-            if idx.sum() > 0:
-                i_w = rdf.InterRDF(ion, self.waters, nbins=nbins, range=range, norm='rdf')
-                i_w.run(frames=idx)
-                self.rdfs['i-w'][CN] = i_w.results
-
-                i_i = rdf.InterRDF(ion, ions, nbins=nbins, range=range, norm='rdf')
-                i_i.run(frames=idx)
-                self.rdfs['i-i'][CN] = i_i.results
-
-                i_ci = rdf.InterRDF(ion, coions, nbins=nbins, range=range, norm='rdf')
-                i_ci.run(frames=idx)
-                self.rdfs['i-ci'][CN] = i_ci.results
 
         return self.rdfs
 

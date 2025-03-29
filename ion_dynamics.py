@@ -353,6 +353,77 @@ class IonDynamics:
         return bin_centers, counts
 
 
+    def rdfs_by_state(self, ion, bin_width=0.05, range=(0,20)):
+        '''
+        Calculate radial distribution functions for each state for `ion`. This method calculates the RDFs for
+        cation-water, cation-cation, cation-anion, cation-COOH, cation-COO-, cation-amideO, and cation-NH2
+        using MDAnalysis InterRDF. It saves the data in a dictionary `rdfs` with keys for each state. 
+        Each state then corresponds to a dictionary of with the RDF types above. 
+        
+        Parameters
+        ----------
+        ion : int, MDAnalysis Atom
+            Either index of the ion or an MDAnalysis Atom of the ion
+        bin_width : float
+            Width of the bins for the RDFs, default=0.05
+        range : array-like
+            Range over which to calculate the RDF, default=(0,20)
+
+        Returns
+        -------
+        rdfs : dict
+            Dictionary of dictionaries with the results for each state. The keys are the states and the values
+            are dictionaries with the RDF types. The keys of the inner dictionaries are the RDF types and the values
+            are the RDF results.
+        
+        '''
+
+        # check for state sequence and proper types
+        if self.state_sequence is None:
+            raise ValueError('No state sequence loaded. Please load a state sequence first.')
+
+        if isinstance(ion, mda.core.groups.Atom):
+                ion = ion.index
+        elif isinstance(ion, (int, np.integer)):
+            pass
+        else:
+            raise ValueError(f'ion must be an index or an MDAnalysis Atom but received {type(ion)}')
+        
+        # initialize bins and selections
+        nbins = int((range[1] - range[0]) / bin_width)
+
+        xlink = self.universe.select_atoms(f'(type c) and (bonded type n)')
+        cooh_C = self.universe.select_atoms(f'(type c) and (bonded type oh)')
+        cooh_OH = self.universe.select_atoms(f'(type oh)')
+        amideO = self.universe.select_atoms(f'(type o) and (bonded group xlink)', xlink=xlink)
+        coo = self.universe.select_atoms(f'(type o) and (not bonded group cooh_C) and (not bonded group xlink)', cooh_C=cooh_C, xlink=xlink)
+        nh2 = self.universe.select_atoms(f'(type nh)')
+        waters = self.waters.select_atoms(f'(type OW)')
+        cations = self.cations - self.universe.select_atoms(f'index {ion}')
+
+        # prepare the selections and their labels
+        selections = [waters, cations, self.anions, cooh_OH, 
+                      coo, amideO, nh2]
+        rdf_types = ['cation-water', 'cation-cation', 'cation-anion', 'cation-COOH', 
+                     'cation-COO-', 'cation-amideO', 'cation-NH2']
+        
+        # generate the RDF data
+        rdfs = {}
+        for state in self.found_states:
+            idx = np.where(self.state_sequence[ion] == state)[0]
+            print(f'Calculating RDFs for state {state} ({len(idx)} frames)')
+            rdfs[state] = {}
+            for l,label in enumerate(rdf_types):
+                rdf = InterRDF(self.universe.select_atoms(f'index {ion}'), 
+                               selections[l],
+                               range=range, norm='rdf', verbose=True)
+                rdf.run(frames=idx)
+                rdfs[state][label] = rdf.results
+
+
+        return rdfs
+
+
     def plot_membrane(self, frame=None, cation_color='blue', anion_color='limegreen', 
                       ydim='x', show_ions=True, show_zones=False, ax=None):
         '''
@@ -409,82 +480,16 @@ class IonDynamics:
             for z in self.polymer_zones:
                 ax.axvline(z, ls='dashed', c='r')
 
+        # plot the periodic boundaries
+        p = plt.Rectangle((0,0), self.universe.dimensions[2], self.universe.dimensions[0], fill=False, lw=1)
+        ax.add_patch(p)
+
 
         ax.set_aspect('equal', adjustable='box')
         ax.set_xlim(0,self.universe.dimensions[2])
         ax.set_ylim(0,self.universe.dimensions[d])
 
         return ax
-    
-
-    def rdfs_by_state(self, ion, bin_width=0.05, range=(0,20)):
-        '''
-        Calculate radial distribution functions for each state for `ion`. This method calculates the RDFs for
-        cation-water, cation-cation, cation-anion, cation-COOH, cation-COO-, cation-amideO, and cation-NH2
-        using MDAnalysis InterRDF. It saves the data in a dictionary attribute `rdfs` with keys for each state. 
-        Each state then corresponds to a dictionary of with the RDF types above. 
-        
-        Parameters
-        ----------
-        ion : int, MDAnalysis Atom
-            Either index of the ion or an MDAnalysis Atom of the ion
-        bin_width : float
-            Width of the bins for the RDFs, default=0.05
-        range : array-like
-            Range over which to calculate the RDF, default=(0,20)
-
-        Returns
-        -------
-        rdfs : dict
-            Dictionary of dictionaries with the results for each state. The keys are the states and the values
-            are dictionaries with the RDF types. The keys of the inner dictionaries are the RDF types and the values
-            are the RDF results.
-        
-        '''
-
-        # check for state sequence and proper types
-        if self.state_sequence is None:
-            raise ValueError('No state sequence loaded. Please load a state sequence first.')
-
-        if isinstance(ion, mda.Atom):
-                ion = ion.index
-        elif isinstance(molecule, (int, np.integer)):
-            pass
-        else:
-            raise ValueError(f'ion must be an index or an MDAnalysis Atom but received {type(ion)}')
-        
-        # initialize bins and selections
-        nbins = int((range[1] - range[0]) / bin_width)
-
-        xlink = self.universe.select_atoms(f'(type c) and (bonded type n)')
-        cooh_C = self.universe.select_atoms(f'(type c) and (bonded type oh)')
-        cooh_OH = self.universe.select_atoms(f'(type oh)')
-        amideO = self.universe.select_atoms(f'(type o) and (bonded group xlink)', xlink=xlink)
-        coo = self.universe.select_atoms(f'(type o) and (not bonded group cooh_C) and (not bonded group xlink)', cooh_C=cooh_C, xlink=xlink)
-        nh2 = self.universe.select_atoms(f'(type nh)')
-        waters = self.waters.select_atoms(f'(type OW)')
-
-        # prepare the selections and their labels
-        selections = [waters, self.cations, self.anions, cooh_OH, 
-                      coo, amideO, nh2]
-        rdf_types = ['cation-water', 'cation-cation', 'cation-anion', 'cation-COOH', 
-                     'cation-COO-', 'cation-amideO', 'cation-NH2']
-        
-        # generate the RDF data
-        rdfs = {}
-        for state in self.found_states:
-            idx = np.where(self.state_sequence[ion] == state)[0]
-            print(f'Calculating RDFs for state {state} ({len(idx)} frames)')
-            rdfs[state] = {}
-            for l,label in enumerate(rdf_types):
-                rdf = InterRDF(self.universe.select_atoms(f'index {ion}'), 
-                               selections[l], 
-                               range=range, norm='rdf', verbose=True)
-                rdf.run(frames=idx)
-                rdfs[state][label] = rdf.results
-
-
-        return self.rdfs
 
     
     def plot_xyz_trajectories(self, x, y, z, c=None, c_label='time (ns)', ax=None, **lc_kwargs):

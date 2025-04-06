@@ -1,14 +1,20 @@
-# Class for a few analyses of polymerization
+# Class for building and analysis of polyamide membrane
 
-import MDAnalysis as mda
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import seaborn as sns
 from matplotlib.ticker import MultipleLocator
 from tqdm import tqdm
 import subprocess
 
+import MDAnalysis as mda
+import MDAnalysis.transformations as trans
+
 class PolymAnalysis():
-    def __init__(self, data_file, frmt='DATA', init_file='system.in.init', settings_file='cleanedsystem.in.settings', tpr_file=None, xlink_c='1', xlink_n='7', term_n='8', cl_type='6', oh_type='10', ow_type='11', hw_type='12'):
+    def __init__(self, data_file, frmt='DATA', init_file='system.in.init', settings_file='cleanedsystem.in.settings',
+                 tpr_file=None, xlink_c='1', xlink_n='7', term_n='8', cl_type='6', oh_type='10',
+                 ow_type='11', hw_type='12', cation_type='', anion_type=''):
 
         self.lmp = '23' # extension for the LAMMPS executable
         self.gmx = 'gmx' # name of the GROMACS executable
@@ -66,6 +72,11 @@ class PolymAnalysis():
         self.oh_type = oh_type
         self.ow_type = ow_type
         self.hw_type = hw_type
+        self.cation_type = cation_type
+        self.anion_type = anion_type
+
+        # store polymer AtomGroup
+        self.polymer = self.universe.select_atoms(f'not type {self.ow_type} {self.hw_type} {self.anion_type} {self.cation_type}')
 
         # Get coordinate information
         self.coords = np.zeros((1,self.n_atoms, 3))
@@ -167,7 +178,7 @@ class PolymAnalysis():
 
         from lammps import PyLammps
 
-        # Use LAMMPS to remove atoms and reset ids
+        # Use LAMMPS to reset ids
         L = PyLammps(self.lmp)
         L.file(self.init_file)
         L.read_data(self.filename)
@@ -374,10 +385,10 @@ class PolymAnalysis():
         [print(log.logfile.name) for log in self.logs]
 
 
-    def load_trajectory(self, traj_file):
+    def load_trajectory(self, traj_file, center=False, save_as_array=False):
         '''Load trajectory data into PolymAnalysis class'''
 
-        print('Loading all trajectory coordinates from {} into coords attribute of {}'.format(traj_file, self))
+        print('Loading all trajectory coordinates from {}'.format(traj_file))
         self.trajectory_file = traj_file
 
         if self.tpr is None:
@@ -387,12 +398,22 @@ class PolymAnalysis():
 
         self.trajectory = self.universe.trajectory
         self.n_frames = len(self.trajectory)
-        self.coords = np.zeros((self.n_frames, self.n_atoms, 3))
-        
-        t = 0
-        for ts in tqdm(self.trajectory):
-            self.coords[t,:,:] = self.universe.atoms.positions
-            t += 1
+
+        workflow = []
+        if center:
+            workflow.append(trans.unwrap(self.universe.atoms))
+            workflow.append(trans.center_in_box(self.polymer, center='mass'))
+            workflow.append(trans.wrap(self.universe.atoms))
+            self.universe.trajectory.add_transformations(*workflow)
+
+
+        if save_as_array:
+            self.coords = np.zeros((self.n_frames, self.n_atoms, 3))
+            
+            t = 0
+            for ts in tqdm(self.trajectory):
+                self.coords[t,:,:] = self.universe.atoms.positions
+                t += 1
 
 
     def pack_water_reservoirs(self, output='prehydrate.data', water_file='water.data', box_frac=0.5, seed=12345):
@@ -1406,6 +1427,11 @@ class PolymAnalysis():
                     dV = box_dims[0] * box_dims[1] * (ub-lb) * (10**-8)**3
                     mass = bin_atoms.masses.sum() / 6.022 / 10**23
                     counts[b] += mass / dV
+                elif method in ['charge', 'charge density']:
+                    box_dims = [self.box[1,i] - self.box[0,i] for i in range(3) if i != d]
+                    dV = box_dims[0] * box_dims[1] * (ub-lb) * (10**-8)**3
+                    charge = bin_atoms.charges.sum() / 6.022 / 10**23
+                    counts[b] += charge / dV
         else:
             for ts in tqdm(self.trajectory[::frameby]):
                 self.box = self._get_box()
@@ -1423,6 +1449,11 @@ class PolymAnalysis():
                         dV = box_dims[0] * box_dims[1] * (ub-lb) * (10**-8)**3
                         mass = bin_atoms.masses.sum() / 6.022 / 10**23
                         counts[b] += mass / dV
+                    elif method in ['charge', 'charge density']:
+                        box_dims = [self.box[1,i] - self.box[0,i] for i in range(3) if i != d]
+                        dV = box_dims[0] * box_dims[1] * (ub-lb) * (10**-8)**3
+                        charge = bin_atoms.charges.sum() / 6.022 / 10**23
+                        counts[b] += charge / dV
 
             counts = counts / len(self.trajectory[::frameby])
 
@@ -1530,43 +1561,100 @@ class PolymAnalysis():
         plt.close()
 
 
-    def plot_membrane(self, PA, water=None, lb=None, ub=None, avg_mem=True, frame=-1, savename=None):
-        '''Plot a scatter plot of the membrane'''
-
-        xyz = self.coords
-
-        fig, ax = plt.subplots(1,2, figsize=(12,6), sharey=True)
+    def plot_membrane(self, PA, ydim='x', water=None, weight='mass', lb=None, ub=None, frame=-1, 
+                      ax=None, savename=None, pa_kwargs={}, water_kwargs={}):
+        '''
+        Plot a KDE plot of the membrane
         
-        if avg_mem: # Plot average membrane coordinates
-            ax[0].scatter(xyz[:,PA,0].mean(axis=0), xyz[:,PA,2].mean(axis=0), c='gray', alpha=0.05)
-            ax[1].scatter(xyz[:,PA,1].mean(axis=0), xyz[:,PA,2].mean(axis=0), c='gray', alpha=0.05, label='average membrane coordinates')
-        else: # Plot one frame of membrane coordinates
-            ax[0].scatter(xyz[frame,PA,0], xyz[frame,PA,2], c='gray', alpha=0.05)
-            ax[1].scatter(xyz[frame,PA,1], xyz[frame,PA,2], c='gray', alpha=0.05)
+        Parameters
+        ----------
+        PA : MDAnalysis AtomGroup
+            AtomGroup of the polymer membrane
+        ydim : str
+            Dimension to plot on the y axis ('x' or 'y')
+        water : MDAnalysis AtomGroup
+            AtomGroup of the water to plot (optional)
+        weight : str
+            Weighting for the polymer ('mass' or 'charge')
+        lb : float
+            Lower bound of the membrane (optional)
+        ub : float
+            Upper bound of the membrane (optional)
+        frame : int
+            Frame to plot (optional)
+        savename : str
+            Name of the file to save the plot (optional)
+        pa_kwargs : dict
+            Keyword arguments to pass to seaborn kdeplot for polymer
+        water_kwargs : dict
+            Keyword arguments to pass to seaborn kdeplot for water
+
+        Returns
+        -------
+        ax : matplotlib Axes
+            Axes object of the plot
+
+        '''
+
+        self.box = self._get_box()
+
+        if ax is None:
+            fig, ax = plt.subplots(1,1, figsize=(8,4))
+
+        if ydim == 'x':
+            d = 0
+        elif ydim == 'y':
+            d = 1
+
+        self.universe.trajectory[frame]
+        coords = pd.DataFrame(PA.positions, columns=['x', 'y', 'z'])
+
+        if weight == 'mass':
+            weights = PA.masses
+        if weight == 'charge':
+            weights = np.abs(PA.charges)
+        
+        # plot the polymer with a kernel density estimate
+        sns.kdeplot(coords, x='z', y=ydim, cmap='Greys', ax=ax, fill=True, 
+                    levels=10, thresh=0.05, cut=0, weights=weights, **pa_kwargs)
 
         if water is not None:
-            # Plot one frame of water coordinates
-            ax[0].scatter(xyz[frame,water,0], xyz[frame,water,2], c='skyblue', alpha=0.01)
-            ax[1].scatter(xyz[frame,water,1], xyz[frame,water,2], c='skyblue', alpha=0.01, label='frame {} water coordinates'.format(frame))
+            if 'fill' not in water_kwargs:
+                water_kwargs['fill'] = False
+            if 'levels' not in water_kwargs:
+                water_kwargs['levels'] = 10
+            if 'thresh' not in water_kwargs:
+                water_kwargs['thresh'] = 0.05
+            if 'cut' not in water_kwargs:
+                water_kwargs['cut'] = 0
+
+            coords = pd.DataFrame(water.positions, columns=['x', 'y', 'z'])
+            # plot the water with a kernel density estimate
+            sns.kdeplot(coords, x='z', y=ydim, cmap='Blues', ax=ax, **water_kwargs)
+            
+        # plot the periodic boundaries
+        # p = plt.Rectangle((self.box[0,2],self.box[0,d]), self.box[1,2]-self.box[0,2], self.box[1,d]-self.box[0,d], fill=False, lw=1)
+        # ax.add_patch(p)
 
         # Plot bulk membrane cutoffs
         if lb is not None:
-            ax[0].axhline(lb, c='r', ls='dashed')
-            ax[1].axhline(lb, c='r', ls='dashed', label='bulk boundaries')
+            ax.axhline(lb, c='r', ls='dashed')
+            ax.axhline(lb, c='r', ls='dashed', label='bulk boundaries')
         if ub is not None:
-            ax[0].axhline(ub, c='r', ls='dashed')
-            ax[1].axhline(ub, c='r', ls='dashed')
+            ax.axhline(ub, c='r', ls='dashed')
+            ax.axhline(ub, c='r', ls='dashed')
 
         # formatting
-        ax[0].set_xlabel('x')
-        ax[0].set_ylabel('z')
-        ax[1].set_xlabel('y')
+        ax.set_xlabel('z dimension ($\AA$)')
+        ax.set_ylabel(ydim+' dimension ($\AA$)')
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xlim(self.box[0,2], self.box[1,2])
+        ax.set_ylim(self.box[0,d], self.box[1,d])
         
-        plt.show()
         if savename is not None:
             fig.savefig(savename)
 
-        plt.close()
+        return ax
 
 
     def write_data(self, output, frame=-1):

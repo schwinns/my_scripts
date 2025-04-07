@@ -16,6 +16,8 @@ import MDAnalysis.transformations as trans
 import deeptime.markov as markov
 from deeptime.markov.tools.analysis import mfpt
 
+from solvation_analysis import Solute
+
 import multiprocessing
 
 
@@ -359,23 +361,60 @@ class IonDynamics:
         return k_entry / k_exit
 
 
-    # def coordination_environment(self, ion, cutoff=5.0): 
-    #     '''
-    #     Get the coordination environment of a given ion.
+    def coordination_environment(self, ions, show_cutoffs=False): 
+        '''
+        Get the coordination environment of a given ion. Uses SolvationAnalysis to estimate the coordination shells
+        and to speciate all the different groups. Saves the solvation_analysis.Solute object to `self.solute`.
 
-    #     Parameters
-    #     ----------
-    #     ion : int, MDAnalysis Atom
-    #         Either index of the ion or an MDAnalysis Atom of the ion
-    #     cutoff : float, optional
-    #         Cutoff distance for the coordination environment. Default = 5.0 Angstroms
+        For more information, look at their documentation: https://solvation-analysis.readthedocs.io/en/latest/index.html
 
-    #     Returns
-    #     -------
+        Parameters
+        ----------
+        ions : MDAnalaysis AtomGroup
+            Ions to calculate the coordination environment for
+        show_cutoffs : bool, optional
+            Whether to show the cutoffs for the different groups. Default = False
 
-    #     '''
+        Returns
+        -------
+        speciation : solvation_analysis.speciation.Speciation class
+            Speciation class with the coordination environment for each ion. Contains speciation data, speciation
+            fractions, etc.
 
+        '''
 
+        xlink_c = dyn.universe.select_atoms(f'(type c) and (bonded type n)')
+        cooh_c = dyn.universe.select_atoms(f'(type c) and (bonded type oh)')
+        coo_c = dyn.universe.select_atoms(f'(type c) and (not bonded type oh n)')
+
+        cooh_oh = dyn.universe.select_atoms(f'type oh')
+        amide_o = dyn.universe.select_atoms(f'(type o) and (bonded group xlink_c)', xlink_c=xlink_c)
+        coo_o = dyn.universe.select_atoms(f'(type o) and (bonded group coo_c)', coo_c=coo_c)
+        nh2 = dyn.universe.select_atoms(f'type nh')
+
+        anions = dyn.universe.select_atoms(f'resname CL')
+        waters = dyn.waters.select_atoms(f'type OW')
+
+        self.solute = Solute.from_atoms(ions,
+                                {
+                                    'amide_o' : amide_o,
+                                    'cooh_oh' : cooh_oh,
+                                    'coo_o' : coo_o,
+                                    'nh2' : nh2,
+                                    'anions' : anions,
+                                    'waters' : waters
+                                }, solute_name='Ion')
+
+        self.solute.run()
+
+        if show_cutoffs:
+            # iterate through solvents
+            for solvent in self.solute.solvents.keys():
+                # plot the RDF!
+                fig = self.solute.plot_solvation_radius('Ion', solvent)
+                fig.show()
+
+        return self.solute.speciation
 
 
     def density_profile(self, frame, atom_groups, bins=None, bin_width=0.5, dim='z', method='atom'):

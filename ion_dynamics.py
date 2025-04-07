@@ -13,6 +13,9 @@ import MDAnalysis as mda
 from MDAnalysis.analysis.rdf import InterRDF
 import MDAnalysis.transformations as trans
 
+import deeptime.markov as markov
+from deeptime.markov.tools.analysis import mfpt
+
 import multiprocessing
 
 
@@ -172,19 +175,23 @@ class IonDynamics:
         traj = self._trajectory_to_numpy(ions)
 
         # pick only ions that are within the middle 50% of the polymer throughout the simulation
-        self.membrane_ions = {}
+        self.membrane_ions_traj = {}
+        idx = []
         for a, atom in enumerate(ions):
             below_ub = (traj[:,a,2] >= self.membrane_bounds[:,1]).all()
             above_lb = (traj[:,a,2] <= self.membrane_bounds[:,3]).all()
             if below_ub and above_lb:
-                self.membrane_ions[atom.index] = traj[:,a,:]
+                self.membrane_ions_traj[atom.index] = traj[:,a,:]
+                idx.append(atom.index)
+
+        self.membrane_ions = self.universe.select_atoms('index ' + ' '.join(map(str, idx)))
 
         # save as a pd.DataFrame and save as csv
-        data = [(ion_id, *coord) for ion_id, coords in self.membrane_ions.items() for coord in coords]
+        data = [(ion_id, *coord) for ion_id, coords in self.membrane_ions_traj.items() for coord in coords]
         self.ion_trajectories = pd.DataFrame(data, columns=['ion_index', 'x', 'y', 'z'])
         
         ion_types = []
-        for idx in self.membrane_ions:
+        for idx in self.membrane_ions_traj:
             ion = self.universe.select_atoms(f'index {idx}')[0]
             [ion_types.append(t) for t in [ion.type]*self.n_frames]
 
@@ -288,6 +295,89 @@ class IonDynamics:
         return self.state_sequence
 
 
+    def partition_coefficient(self, ions, states, verbose=False):
+        '''
+        Calculate the partition coefficient for ions entering the membrane. The partition coefficient is
+        defined as the ratio of the rate of ions entering the membrane to the rate of ions exiting the
+        membrane. 
+        
+        This method fits a Markov state model for three states -- in solution, in the interface, 
+        and in the bulk membrane. The rates are calculated using the Mean First Passage Time (MFPT) for going 
+        from the solution to the bulk (entry) and from the bulk to the solution (exit).
+
+        k = 1 / MFPT
+
+        Parameters
+        ----------
+        ions : MDAnalysis AtomGroup
+            AtomGroup with the ions to calculate the partition coefficient for
+        states : array-like
+            Time series states for the ions (n_frames,n_ions)
+        verbose : bool, optional
+            Whether to print the results. Default = False
+
+        Returns
+        -------
+        partition_coefficient : float
+            Partition coefficient for the ions.
+        
+        '''
+
+        # Fit a Markov model on the state data
+
+        # first, count the transitions between states
+        counter = markov.TransitionCountEstimator(lagtime=1, count_mode='effective', n_states=3) # note: lagtime=1 means I am using every timestep
+        counts = counter.fit_fetch(states)
+        if verbose:
+            print('Counts matrix:\n', counts.count_matrix)
+
+        # fit the Markov model
+        estimator = markov.msm.MaximumLikelihoodMSM(reversible=True, stationary_distribution_constraint=None)
+        msm = estimator.fit_fetch(counts)
+        if verbose:
+            print('\nEstimated transition matrix:\n', msm.transition_matrix)
+            print('\nEstimated stationary distribution:\n', msm.stationary_distribution)
+
+        # Estimate the rate at which ions go from the solution (state 0) to the bulk (state 2)
+        # to do this, we will calculate the mean first passage time (MFPT) from state 0 to state 2
+        # the mean first passage time is the expected number of steps it takes to read a particular state for the first time
+        # this value is then the inverse of the rate
+
+        # Calculate the rate an ion moves from state i to state j using the transition matrix P
+        P = msm.transition_matrix
+        solution_state = 0  # state index for solution
+        bulk_state = 2  # state index for bulk
+
+        k_entry = 1 / mfpt(P, target=bulk_state, origin=solution_state) * (self.dt/1000) # rate from solution to bulk in ns^-1
+        k_exit = 1 / mfpt(P, target=solution_state, origin=bulk_state) * (self.dt/1000) # rate from bulk to solution in ns^-1
+
+        if verbose:
+            print(f'Rate of entry into the membrane: {k_entry:.4f} ns^-1, which corresponds to a MFPT of {1/k_entry:.4f} ns')
+            print(f'Rate of exit from the membrane: {k_exit:.4f} ns^-1, which corresponds to a MFPT of {1/k_exit:.4f} ns')
+            print(f'Partition coefficient: {k_entry/k_exit:.4f}')
+
+        return k_entry / k_exit
+
+
+    # def coordination_environment(self, ion, cutoff=5.0): 
+    #     '''
+    #     Get the coordination environment of a given ion.
+
+    #     Parameters
+    #     ----------
+    #     ion : int, MDAnalysis Atom
+    #         Either index of the ion or an MDAnalysis Atom of the ion
+    #     cutoff : float, optional
+    #         Cutoff distance for the coordination environment. Default = 5.0 Angstroms
+
+    #     Returns
+    #     -------
+
+    #     '''
+
+
+
+
     def density_profile(self, frame, atom_groups, bins=None, bin_width=0.5, dim='z', method='atom'):
         '''
         Calculate the partial density across the box for a given atom group
@@ -383,7 +473,7 @@ class IonDynamics:
             raise ValueError('No state sequence loaded. Please load a state sequence first.')
 
         if isinstance(ion, mda.core.groups.Atom):
-                ion = ion.index
+            ion = ion.index
         elif isinstance(ion, (int, np.integer)):
             pass
         else:
@@ -539,6 +629,46 @@ class IonDynamics:
         ax[2].set_xlim(0, (self.time/1000).max())
 
         return ax
+
+
+    def _classify_by_location(self, traj_array):
+        '''
+        Classify the ions by their location in the polymer zones. The classification is done by
+        checking the z-coordinate of each ion.
+
+        0 : in solution
+        1 : in interface (outer 25% of polymer)
+        2 : in bulk membrane (inner 50% of polymer)
+
+        Parameters
+        ----------
+        traj_array : np.ndarray
+            Array of shape (n_frames, n_ions, 3). This is the trajectory array for the ions. Can be directly
+            input from `self._trajectory_to_numpy` or `self._traj_array`.
+
+        Returns
+        -------
+        states_array : np.ndarray
+            Array of shape (n_frames, n_ions). The classification of each ion at each frame as defined above.
+
+        '''
+
+        states_array = np.zeros((traj_array.shape[0], traj_array.shape[1]), dtype=int) # 0 = in solution, 1 = in interface (outer 25% polymer), 2 = in bulk (inner 50% polymer)
+        for t in range(traj_array.shape[0]):
+
+            idx = (traj_array[t,:,2] <= dyn.membrane_bounds[t,0]) | (traj_array[t,:,2] >= dyn.membrane_bounds[t,4]) # in solution on either side
+            states_array[t, idx] = 0
+
+            idx = (traj_array[t,:,2] > dyn.membrane_bounds[t,0]) & (traj_array[t,:,2] < dyn.membrane_bounds[t,1]) # in interface on left side
+            states_array[t, idx] = 1
+
+            idx = (traj_array[t,:,2] > dyn.membrane_bounds[t,3]) & (traj_array[t,:,2] < dyn.membrane_bounds[t,4]) # in interface on right side
+            states_array[t, idx] = 1
+
+            idx = (traj_array[t,:,2] >= dyn.membrane_bounds[t,1]) & (traj_array[t,:,2] <= dyn.membrane_bounds[t,3]) # in bulk
+            states_array[t, idx] = 2
+
+        return states_array
     
 
     def _trajectory_to_numpy(self, atom_group):
@@ -554,18 +684,18 @@ class IonDynamics:
         
         Returns
         -------
-        traj : np.ndarray
-            Array of shape (n_frames, n_atoms, 3)
+        _traj_array : np.ndarray
+            Array of shape (n_frames, n_atoms, 3). Also, saved as attribute `self._traj_array`
         
         '''
 
-        traj = np.zeros((self.universe.trajectory.n_frames, atom_group.n_atoms, 3))
+        self._traj_array = np.zeros((self.universe.trajectory.n_frames, atom_group.n_atoms, 3))
         self.membrane_bounds = np.zeros((self.universe.trajectory.n_frames, 5))
         for i,ts in tqdm(enumerate(self.universe.trajectory)):
             self.membrane_bounds[i,:] = self.polymer_zones
-            traj[i,:,:] = atom_group.positions
+            self._traj_array[i,:,:] = atom_group.positions
 
-        return traj
+        return self._traj_array
     
 
     def _coordinates_as_dataframe(self, atom_group, frame=None):

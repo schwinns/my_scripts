@@ -20,10 +20,10 @@ class DiffusionCoefficient:
 
         Parameters
         ----------
-        top : str
-            Name of the topology file (e.g. gro, tpr, pdb)
-        traj : str
-            Name of the trajectory file (e.g. xtc, trr, dcd)
+        top : str, None
+            Name of the topology file (e.g. gro, tpr, pdb) If None, you must create a Universe manually.
+        traj : str, None
+            Name of the trajectory file (e.g. xtc, trr, dcd). If None, you must create a Universe manually.
         membrane : str
             MDAnalysis selection language for the membrane, default='resname PA*'
         water : str
@@ -35,27 +35,28 @@ class DiffusionCoefficient:
         
         '''
 
-        # Load in underlying MDAnalysis Universe and pre-select some atom groups
-        self.universe = mda.Universe(top, traj)
-        self.PA = self.universe.select_atoms(membrane)
-        self.water = self.universe.select_atoms(water)
-        self.cation = self.universe.select_atoms(cation)
-        self.anion = self.universe.select_atoms(anion)
+        if top is not None or traj is not None:
+            # Load in underlying MDAnalysis Universe and pre-select some atom groups
+            self.universe = mda.Universe(top, traj)
+            self.PA = self.universe.select_atoms(membrane)
+            self.water = self.universe.select_atoms(water)
+            self.cation = self.universe.select_atoms(cation)
+            self.anion = self.universe.select_atoms(anion)
 
-        # create a workflow for on-the-fly transformations
-        workflow = []
-        
-        # if membrane is present, center around membrane
-        if len(self.PA) > 0:
-            workflow.append(trans.unwrap(self.universe.atoms))
-            workflow.append(trans.center_in_box(self.PA, center='mass'))
-            workflow.append(trans.wrap(self.universe.atoms))
+            # create a workflow for on-the-fly transformations
+            workflow = []
+            
+            # if membrane is present, center around membrane
+            if len(self.PA) > 0:
+                workflow.append(trans.unwrap(self.universe.atoms))
+                workflow.append(trans.center_in_box(self.PA, center='mass'))
+                workflow.append(trans.wrap(self.universe.atoms))
 
-        # no jump trajectory unwrapping, necessary for diffusion coefficient calculations
-        workflow.append(trans.nojump.NoJump())
+            # no jump trajectory unwrapping, necessary for diffusion coefficient calculations
+            workflow.append(trans.nojump.NoJump())
 
-        # add transformations
-        self.universe.trajectory.add_transformations(*workflow)
+            # add transformations
+            self.universe.trajectory.add_transformations(*workflow)
         
 
     def run(self, atom_group, n_bootstraps=0, confidence=0.95, msd_kwargs={}, fit_kwargs={}):

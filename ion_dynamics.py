@@ -13,11 +13,6 @@ import MDAnalysis as mda
 from MDAnalysis.analysis.rdf import InterRDF
 import MDAnalysis.transformations as trans
 
-import deeptime.markov as markov
-from deeptime.markov.tools.analysis import mfpt
-
-from solvation_analysis.solute import Solute
-
 import multiprocessing
 
 
@@ -337,12 +332,12 @@ class IonDynamics:
         self.unique_states = {}
 
         for i,molecule in enumerate(molecules):
-            if isinstance(molecule, mda.AtomGroup):
+            if isinstance(molecule, mda.core.groups.Atom):
                 molecule = molecule.index
             elif isinstance(molecule, (int, np.integer)):
                 pass
             else:
-                raise ValueError(f'molecules must be a list of indices or an MDAnalysis AtomGroup but received {type(molecule)}')
+                raise ValueError(f'molecules must be a list of indices or an MDAnalysis AtomGroup but received {type(molecules)}')
 
             self.state_sequence[molecule] = state_sequence[:,i]
             self.unique_states[molecule] = np.unique(state_sequence[:,i])
@@ -387,6 +382,8 @@ class IonDynamics:
 
         '''
 
+        import deeptime.markov as markov
+
         if self.state_sequence is None:
             raise ValueError('No state sequence loaded. Please load a state sequence first.')
 
@@ -394,7 +391,7 @@ class IonDynamics:
         state_sequence_idx = np.zeros((n_steps, n_ions), dtype=int)
         state_sequence = np.zeros((n_steps, n_ions), dtype=int)
         for ion in range(n_ions):
-            msm = markov.msm.MarkovStateModel(parameters['T'])
+            msm = markov.msm.MarkovStateModel(parameters['T'][0,...])
             state_sequence_idx[:,ion] = msm.simulate(n_steps) # this will be in terms of the indices of ihmm.found_states
             state_sequence[:,ion] = np.array([self.found_states[i] for i in state_sequence_idx[:,ion]])
 
@@ -412,8 +409,8 @@ class IonDynamics:
             for i in tqdm(range(1,n_steps)):
 
                 z_idx = state_sequence_idx[i, ion]
-                A_z = parameters['A'][0,...,z_idx] # autoregressive matrix for this state
-                sigma_z = parameters['sigma'][...,z_idx] # error covariance matrix for this state
+                A_z = parameters['A'][0,0,...,z_idx] # autoregressive matrix for this state
+                sigma_z = parameters['sigma'][0,...,z_idx] # error covariance matrix for this state
 
                 # if the state has changed, we need to shift the trajectory to the last 
                 if z_idx != z_idx_prev:
@@ -456,6 +453,9 @@ class IonDynamics:
             Partition coefficient for the ions.
         
         '''
+
+        import deeptime.markov as markov
+        from deeptime.markov.tools.analysis import mfpt
 
         # Fit a Markov model on the state data
 
@@ -515,17 +515,19 @@ class IonDynamics:
 
         '''
 
-        xlink_c = dyn.universe.select_atoms(f'(type c) and (bonded type n)')
-        cooh_c = dyn.universe.select_atoms(f'(type c) and (bonded type oh)')
-        coo_c = dyn.universe.select_atoms(f'(type c) and (not bonded type oh n)')
+        from solvation_analysis.solute import Solute
 
-        cooh_oh = dyn.universe.select_atoms(f'type oh')
-        amide_o = dyn.universe.select_atoms(f'(type o) and (bonded group xlink_c)', xlink_c=xlink_c)
-        coo_o = dyn.universe.select_atoms(f'(type o) and (bonded group coo_c)', coo_c=coo_c)
-        nh2 = dyn.universe.select_atoms(f'type nh')
+        xlink_c = self.universe.select_atoms(f'(type c) and (bonded type n)')
+        cooh_c = self.universe.select_atoms(f'(type c) and (bonded type oh)')
+        coo_c = self.universe.select_atoms(f'(type c) and (not bonded type oh n)')
 
-        anions = dyn.universe.select_atoms(f'resname CL')
-        waters = dyn.waters.select_atoms(f'type OW')
+        cooh_oh = self.universe.select_atoms(f'type oh')
+        amide_o = self.universe.select_atoms(f'(type o) and (bonded group xlink_c)', xlink_c=xlink_c)
+        coo_o = self.universe.select_atoms(f'(type o) and (bonded group coo_c)', coo_c=coo_c)
+        nh2 = self.universe.select_atoms(f'type nh')
+
+        anions = self.universe.select_atoms(f'resname CL')
+        waters = self.waters.select_atoms(f'type OW')
 
         self.solute = Solute.from_atoms(ions,
                                 {
@@ -813,16 +815,16 @@ class IonDynamics:
         states_array = np.zeros((traj_array.shape[0], traj_array.shape[1]), dtype=int) # 0 = in solution, 1 = in interface (outer 25% polymer), 2 = in bulk (inner 50% polymer)
         for t in range(traj_array.shape[0]):
 
-            idx = (traj_array[t,:,2] <= dyn.membrane_bounds[t,0]) | (traj_array[t,:,2] >= dyn.membrane_bounds[t,4]) # in solution on either side
+            idx = (traj_array[t,:,2] <= self.membrane_bounds[t,0]) | (traj_array[t,:,2] >= self.membrane_bounds[t,4]) # in solution on either side
             states_array[t, idx] = 0
 
-            idx = (traj_array[t,:,2] > dyn.membrane_bounds[t,0]) & (traj_array[t,:,2] < dyn.membrane_bounds[t,1]) # in interface on left side
+            idx = (traj_array[t,:,2] > self.membrane_bounds[t,0]) & (traj_array[t,:,2] < self.membrane_bounds[t,1]) # in interface on left side
             states_array[t, idx] = 1
 
-            idx = (traj_array[t,:,2] > dyn.membrane_bounds[t,3]) & (traj_array[t,:,2] < dyn.membrane_bounds[t,4]) # in interface on right side
+            idx = (traj_array[t,:,2] > self.membrane_bounds[t,3]) & (traj_array[t,:,2] < self.membrane_bounds[t,4]) # in interface on right side
             states_array[t, idx] = 1
 
-            idx = (traj_array[t,:,2] >= dyn.membrane_bounds[t,1]) & (traj_array[t,:,2] <= dyn.membrane_bounds[t,3]) # in bulk
+            idx = (traj_array[t,:,2] >= self.membrane_bounds[t,1]) & (traj_array[t,:,2] <= self.membrane_bounds[t,3]) # in bulk
             states_array[t, idx] = 2
 
         return states_array

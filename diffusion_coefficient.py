@@ -184,7 +184,7 @@ class DiffusionCoefficient:
         Returns
         -------
         D : float
-            Diffusion coefficient for the calculated MSD
+            Diffusion coefficient for the calculated MSD (nm^2 / ns = D*1e-9 m^2 / s)
         stderr : float
             Standard error for D in the linear fit
 

@@ -327,7 +327,7 @@ class IonDynamics:
         if len(molecules) != state_sequence.shape[1]:
             raise ValueError(f'Number of molecules ({len(molecules)}) does not match the number of columns in state_sequence ({state_sequence.shape[1]})')
 
-        self._state_sequnce_array = state_sequence
+        self._state_sequence_array = state_sequence
         self.state_sequence = {}
         self.unique_states = {}
 
@@ -493,7 +493,7 @@ class IonDynamics:
         return k_entry / k_exit
 
 
-    def coordination_environment(self, ions, show_cutoffs=False): 
+    def coordination_environment(self, ions, show_cutoffs=False, cation_radius=3.15): 
         '''
         Get the coordination environment of a given ion. Uses SolvationAnalysis to estimate the coordination shells
         and to speciate all the different groups. Saves the solvation_analysis.Solute object to `self.solute`.
@@ -506,6 +506,9 @@ class IonDynamics:
             Ions to calculate the coordination environment for
         show_cutoffs : bool, optional
             Whether to show the cutoffs for the different groups. Default = False
+        cation_radius : float, optional
+            Radius to determine cation-cation coordination. This will likely never happen, but it is here for completeness.
+            Default = 3.15 Angstroms is the Na-water minimum in the RDF.
 
         Returns
         -------
@@ -526,6 +529,7 @@ class IonDynamics:
         coo_o = self.universe.select_atoms(f'(type o) and (bonded group coo_c)', coo_c=coo_c)
         nh2 = self.universe.select_atoms(f'type nh')
 
+        cations = self.cations
         anions = self.universe.select_atoms(f'resname CL')
         waters = self.waters.select_atoms(f'type OW')
 
@@ -536,8 +540,10 @@ class IonDynamics:
                                     'coo_o' : coo_o,
                                     'nh2' : nh2,
                                     'anions' : anions,
+                                    'cations' : cations,
                                     'waters' : waters
-                                }, solute_name='Ion')
+                                }, solute_name='Ion',
+                                radii = {'cations' : cation_radius})
 
         self.solute.run()
 
@@ -655,20 +661,23 @@ class IonDynamics:
         # initialize bins and selections
         nbins = int((range[1] - range[0]) / bin_width)
 
+        noH = self.universe.select_atoms(f'(not element H)') - self.universe.select_atoms(f'index {ion}')
         xlink = self.universe.select_atoms(f'(type c) and (bonded type n)')
         cooh_C = self.universe.select_atoms(f'(type c) and (bonded type oh)')
         cooh_OH = self.universe.select_atoms(f'(type oh)')
         amideO = self.universe.select_atoms(f'(type o) and (bonded group xlink)', xlink=xlink)
-        coo = self.universe.select_atoms(f'(type o) and (not bonded group cooh_C) and (not bonded group xlink)', cooh_C=cooh_C, xlink=xlink)
+        coo_O = self.universe.select_atoms(f'(type o) and (not bonded group cooh_C) and (not bonded group xlink)', cooh_C=cooh_C, xlink=xlink)
         nh2 = self.universe.select_atoms(f'(type nh)')
         waters = self.waters.select_atoms(f'(type OW)')
         cations = self.cations - self.universe.select_atoms(f'index {ion}')
+        polymer = self.polymer.select_atoms('not element H')
 
         # prepare the selections and their labels
         selections = [waters, cations, self.anions, cooh_OH, 
-                      coo, amideO, nh2]
+                      coo_O, amideO, nh2, polymer, noH]
         rdf_types = ['cation-water', 'cation-cation', 'cation-anion', 'cation-COOH', 
-                     'cation-COO-', 'cation-amideO', 'cation-NH2']
+                     'cation-COO-', 'cation-amideO', 'cation-NH2', 'cation-polymer',
+                     'cation-noH']
         
         # generate the RDF data
         rdfs = {}
@@ -681,6 +690,18 @@ class IonDynamics:
                                selections[l],
                                range=range, norm='rdf', verbose=True)
                 rdf.run(frames=idx)
+
+                # calculate the renormalization factor
+                Na = 1 # since we are only looking at one ion
+                Nb = len(noH) # normalization should always be done with respect to the noH group
+                volume = rdf.volume_cum / rdf.n_frames
+                shell_vol = np.power(rdf.results.edges[1:], 3) - np.power(rdf.results.edges[:-1], 3)
+                shell_vol *= 4/3.0 * np.pi
+                norm = 1 / (Na * Nb / volume * shell_vol * rdf.n_frames)
+
+                # save the renormalized RDF to the results
+                rdf.results.renorm = rdf.results.count * norm
+
                 rdfs[state][label] = rdf.results
 
 

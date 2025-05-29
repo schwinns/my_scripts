@@ -185,16 +185,25 @@ class EXAFS(ParallelAnalysisBase):
     write_feff_kwargs : dict
         Dictionary of keyword arguments to pass to the `write_feff` function, which writes the FEFF input file.
         This can include parameters like `edge`, `s02`, `kmax`, etc. See the `write_feff` function for details.
+    dir : str
+        Directory to write the FEFF input files and results. Default is './'.
     **kwargs : dict
         Additional keyword arguments passed to the base class.
 
     Results are available through the :attr:`results`.
     
     '''
-    def __init__(self, absorber, write_feff_kwargs={}, **kwargs):
+    def __init__(self, absorber, write_feff_kwargs={}, dir='./', **kwargs):
         super(EXAFS, self).__init__(absorber.universe.trajectory, **kwargs)
         self.absorber = absorber[0] # ensure we have a single atom
         self.u = absorber.universe
+
+        self.dir = dir
+        if not self.dir.endswith('/'):
+            self.dir += '/'
+
+        if not os.path.exists(self.dir):
+            run(f'mkdir {self.dir}')  # create the directory if it does not exist
 
         self.feff_settings = write_feff_kwargs
 
@@ -239,14 +248,14 @@ class EXAFS(ParallelAnalysisBase):
             atom_lines.append(line)
 
         # write FEFF input and run
-        run(f'mkdir ./frame{frame_idx:04d}')
-        inp = write_feff(potential_lines, atom_lines, filename=f'./frame{frame_idx:04d}/feff.inp',
+        run(f'mkdir {self.dir}frame{frame_idx:04d}')
+        inp = write_feff(potential_lines, atom_lines, filename=f'{self.dir}frame{frame_idx:04d}/feff.inp',
                          **self.feff_settings)
-        feff = xafs.feff8l(folder=f'./frame{frame_idx:04d}', feffinp=inp)
+        feff = xafs.feff8l(folder=f'{self.dir}frame{frame_idx:04d}', feffinp=inp)
         feff.run()
 
         # save results and time for this frame
-        df = load_feff(f'./frame{frame_idx:04d}/chi.dat')
+        df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')
         self.results._per_frame[frame_idx] = df
 
         frame_end = time()

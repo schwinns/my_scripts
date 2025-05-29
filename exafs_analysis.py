@@ -267,7 +267,7 @@ class EXAFS(ParallelAnalysisBase):
     
     def _conclude(self):
         
-        self.results.k = load_feff(f'./frame{0:04d}/chi.dat')['k'].values
+        self.results.k = load_feff(f'{self.dir}frame{0:04d}/chi.dat')['k'].values
         self.results.k2chi = np.zeros(self.results.k.shape)
         
         # take the average over all frames

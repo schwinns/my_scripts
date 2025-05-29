@@ -223,7 +223,7 @@ class EXAFS(ParallelAnalysisBase):
 
         frame_start = time()
 
-        cluster = self.u.select_atoms(f'sphzone 5 index {self.absorber.index}') - self.absorber # get atoms in a 5 A sphere around the cation
+        cluster = self.u.select_atoms(f'sphzone 8 index {self.absorber.index}') - self.absorber # get atoms in a 8 A sphere around the cation
 
         # first, create a dictionary of unique potential indices
         ipots = {}
@@ -267,8 +267,8 @@ class EXAFS(ParallelAnalysisBase):
     
     def _conclude(self):
         
-        self.results.k = self.results._per_frame[0]['k'].values
-        self.resuts.k2chi = np.zeros(self.results.k.shape)
+        self.results.k = load_feff(f'./frame{0:04d}/chi.dat')['k'].values
+        self.results.k2chi = np.zeros(self.results.k.shape)
         
         # take the average over all frames
         for res in self._result:

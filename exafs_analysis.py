@@ -1,6 +1,7 @@
 # Class to extract clusters from MD simulations and calculate EXAFS spectra with FEFF
 
 import numpy as np
+import os
 import pandas as pd
 from textwrap import dedent
 from time import perf_counter as time
@@ -171,6 +172,7 @@ def load_feff(chi_file):
     data = np.loadtxt(chi_file, comments='#')
     feff = pd.DataFrame(data, columns=['k', 'chi', 'mag', 'phase'])
     feff['k2chi'] = feff.k**2 * feff.chi
+    feff = feff.query('k > 0') # remove k=0, if present
     return feff
 
 
@@ -215,13 +217,24 @@ class EXAFS(ParallelAnalysisBase):
 
         # save information for timing
         self.start_time = time()
-        self.frame_times = []
+        self.frame_times = {}
 
     def _single_frame(self, frame_idx):
         self._frame_index = frame_idx
         self._ts = self.u.trajectory[frame_idx]
 
         frame_start = time()
+
+        # if the calculation has already been run, skip
+        if os.path.exists(f'{self.dir}frame{frame_idx:04d}/chi.dat'):
+            df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')
+
+            frame_end = time()
+
+            print(f'{self.dir}frame{frame_idx:04d}/ already performed, skipping...')
+
+            # return the results for this frame
+            return df, frame_idx, frame_end - frame_start
 
         cluster = self.u.select_atoms(f'sphzone 8 index {self.absorber.index}') - self.absorber # get atoms in a 8 A sphere around the cation
 
@@ -254,15 +267,12 @@ class EXAFS(ParallelAnalysisBase):
         feff = xafs.feff8l(folder=f'{self.dir}frame{frame_idx:04d}', feffinp=inp)
         feff.run()
 
-        # save results and time for this frame
+        # report results and time for this frame
         df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')
-        self.results._per_frame[frame_idx] = df
-
         frame_end = time()
-        self.frame_times.append(frame_end - frame_start)
 
         # return the results for this frame
-        return df['k2chi'].values
+        return df, frame_idx, frame_end - frame_start
 
     
     def _conclude(self):
@@ -270,9 +280,12 @@ class EXAFS(ParallelAnalysisBase):
         self.results.k = load_feff(f'{self.dir}frame{0:04d}/chi.dat')['k'].values
         self.results.k2chi = np.zeros(self.results.k.shape)
         
-        # take the average over all frames
+        # extract results from all processors and average k2chi
         for res in self._result:
-            self.results.k2chi += res
+            df, idx, t = res
+            self.results._per_frame[idx] = df
+            self.results.k2chi += res['k2chi'].values
+            self.frame_times[idx] = t
 
         self.results.k2chi /= len(self._result)
 
@@ -280,7 +293,7 @@ class EXAFS(ParallelAnalysisBase):
         self.end_time = time()
         print('\n')
         print('-'*20 + '  Timing  ' + '-'*20)
-        for f,t in enumerate(self.frame_times):
+        for f,t in self.frame_times.items():
             print(f'Frame {f:04d}'.ljust(25) + f'{t:.2f} s'.rjust(25))
 
         total_time = self.end_time - self.start_time # s

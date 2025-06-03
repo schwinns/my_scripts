@@ -265,7 +265,7 @@ class EXAFS(ParallelAnalysisBase):
         inp = write_feff(potential_lines, atom_lines, filename=f'{self.dir}frame{frame_idx:04d}/feff.inp',
                          **self.feff_settings)
         feff = xafs.feff8l(folder=f'{self.dir}frame{frame_idx:04d}', feffinp=inp)
-        feff.run()
+        # feff.run() # I think this is repetitive
 
         # report results and time for this frame
         df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')

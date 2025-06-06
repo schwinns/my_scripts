@@ -1,5 +1,7 @@
-# Class to extract clusters from MD simulations and calculate EXAFS spectra with FEFF
+# Class to extract clusters from MD simulations and calculate EXAFS spectra with FEFF, optimize with experimental data
 
+from glob import glob
+import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
@@ -13,6 +15,17 @@ from MDAnalysis.analysis.base import Results
 from larch import xafs
 from ParallelMDAnalysis import ParallelAnalysisBase
 
+# from skopt import gp_minimize
+from matplotlib.ticker import MultipleLocator
+plt.rcParams['font.size'] = 16
+
+import multiprocessing
+from multiprocessing import Pool
+from functools import partial
+
+import warnings
+warnings.simplefilter("ignore", SyntaxWarning)
+
 
 def run(commands : list | str):
     '''Run commands with subprocess'''
@@ -23,6 +36,40 @@ def run(commands : list | str):
         out = subprocess.run(cmd, shell=True)
 
     return out
+
+
+def k2chi_axis(ion='Unspecified', xmin=1, xmax=6, ymin=-0.6, ymax=0.6, 
+               xtick=0.2, ytick=0.05, ax=None):
+    
+    if ax is None:
+        fig, ax = plt.subplots(1,1, figsize=(6, 4))
+
+    ax.axhline(0, color='gray', lw=0.5)
+    ax.set_xlabel('$k$ (1/$\AA$)')
+    ax.set_ylabel(f'$k^2 \chi(k)$ around {ion}')
+    ax.set_xticks(np.arange(0, 10, 1))
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.xaxis.set_minor_locator(MultipleLocator(xtick))
+    ax.yaxis.set_minor_locator(MultipleLocator(ytick))
+    return ax
+
+
+def chiR_axis(ion='Unspecified', xmin=0, xmax=6, ymin=-0.6, ymax=0.6, 
+               xtick=0.2, ytick=0.05, ax=None):
+    
+    if ax is None:
+        fig, ax = plt.subplots(1,1, figsize=(6, 4))
+
+    ax.axhline(0, color='gray', lw=0.5)
+    ax.set_xlabel('$R$ ($\AA$)')
+    ax.set_ylabel(f'|$\chi(R)$| ($\AA^{-3}$) around {ion}')
+    ax.set_xticks(np.arange(0, 10, 1))
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.xaxis.set_minor_locator(MultipleLocator(xtick))
+    ax.yaxis.set_minor_locator(MultipleLocator(ytick))
+    return ax
 
 
 def list2str(lst):
@@ -302,3 +349,164 @@ class EXAFS(ParallelAnalysisBase):
         seconds = int(total_time % 60)
         print(f'\nTotal time:'.ljust(25) + f'{hours:d}:{minutes:d}:{seconds:d}'.rjust(25))
         print('-'*50)
+
+
+def feff_per_path(file_idx, files, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
+    '''
+    Function to read a FEFF path file and calculate the chi(k) for a single path.
+    
+    Parameters
+    ----------
+    file_idx : int
+        Index of the FEFF path file from a list of file paths.
+    files : list of str
+        List of FEFF path files.
+    k : np.ndarray
+        k-space points at which to calculate chi(k).
+    deltar : float, optional
+        Delta R parameter for the FEFF calculation. Default is 0.0.
+    e0 : float, optional
+        E0 parameter for the FEFF calculation. Default is 0.0.
+    sigma2 : float, optional
+        Sigma^2 parameter for the FEFF calculation. Default is 0.0.
+    s02 : float, optional
+        S0^2 parameter for the FEFF calculation. Default is 1.0.
+
+    Returns
+    -------
+    chi : np.ndarray
+        Calculated chi(k) for the given FEFF path.
+    
+    '''
+    
+    file = files[file_idx]
+    path = xafs.feffpath(file, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
+    xafs.path2chi(path, k=k) # calculate chi(k) for the path at the same points as experimental data
+    k2chi = path.chi * path.k**2  # k^2 * chi(k)
+    return k2chi
+            
+
+def feff_average_paths_equal(params, k, njobs=1):
+    '''
+    Function to average k^2*chi(k) from multiple FEFF calculations assuming all paths have the same parameters
+    
+    Parameters
+    ----------
+    params : np.ndarray
+        Parameters for the FEFF calculations. These are structured as follows:
+        [deltar, e0, sigma2]
+        where each element corresponds to a different parameter in the chi(k) calculation.
+    k : np.ndarray
+        k-space points at which to calculate chi(k).
+    njobs : int, optional
+        Number of parallel jobs to run. Default is 1 (no parallelization).
+        If set to -1, it will use all available CPU cores.
+
+    Returns
+    -------
+    k2chi : np.ndarray
+        Averaged k^2*chi(k) values across all frames, structured as a 1D array with same shape as experiment.
+
+    '''
+
+    # Unpack parameters
+    deltar = params[0]
+    e0 = params[1]
+    sigma2 = params[2]
+
+    # parallelize
+    if njobs == -1:
+        n = multiprocessing.cpu_count()
+    else:
+        n = njobs
+    
+    # start_load = time()
+    n_frames = len(glob('./frame*/chi.dat'))  # count number of frames
+    paths = glob(f'./frame*/feff*.dat') # assumes FEFF files are named consistently within frameXXXX
+    run_per_path = partial(feff_per_path, files=paths, k=k, deltar=deltar, e0=e0, sigma2=sigma2, s02=0.816)
+
+    with Pool(n) as worker_pool:
+        result = worker_pool.map(run_per_path, np.arange(len(paths)))
+
+    result = np.asarray(result) 
+    
+    return result.sum(axis=0) / n_frames  # sum over all paths, averaged over all frames
+
+
+def R_factor(calc_data, exp_data):
+    '''
+    Function to calculate the R-factor for the fit of k^2*chi(k) data.
+    
+    Parameters
+    ----------
+    calc_data : np.ndarray
+        Calculated k^2*chi(k) data, structured as a 1D array with shape (nk,).
+    exp_data : np.ndarray
+        Experimental k^2*chi(k) data for comparison, structured as a 1D array with shape (nk,).
+
+    Returns
+    -------
+    R : float
+        The R-factor, which is the ratio of the root mean square deviation of the experimental data from the calculated data
+        to the root mean square of the experimental data.
+    
+    '''
+    
+    R = np.sqrt(np.sum((exp_data - calc_data)**2) / np.sum(exp_data**2))
+    
+    return R
+
+
+def opt_func(params, exp_data, k, loss=R_factor, **kwargs):
+    '''
+    Function to optimize for the best fit of the average k2chi
+    
+    Parameters
+    ----------
+    params : np.ndarray
+        Parameters to be optimized. Should be structured as 1D array as described in `feff_average`.
+    exp_data : np.ndarray
+        Experimental k^2*chi(k) data for comparison, structured as a 2D array with shape (nk,) where nk is the
+        number of k-space points in the experimental data.
+    k : np.ndarray
+        k-space points at which to calculate chi(k).
+    loss : callable, optional
+        Loss function to minimize. Default is mean_squared_error.
+    **kwargs : dict, optional
+        Additional keyword arguments to pass to the feff_average function.
+
+    Returns
+    -------
+    loss_value : float
+        The computed loss value between the averaged k2chi and the experimental data.
+        
+    '''
+    
+    k2chi = feff_average_paths_equal(params, k=k, **kwargs)
+
+    if np.any(np.isnan(k2chi)) or np.any(np.isinf(k2chi)):
+        return 1e6  # Large penalty for invalid results
+    loss_value = loss(k2chi, exp_data)
+    if np.isnan(loss_value) or np.isinf(loss_value):
+        return 1e6
+    
+    return loss_value
+
+
+class EarlyStopper:
+    def __init__(self, tol=1e-4, patience=10):
+        self.tol = tol
+        self.patience = patience
+        self.best = np.inf
+        self.counter = 0
+
+    def __call__(self, res):
+        current = np.min(res.func_vals)
+        if current < self.best - self.tol:
+            self.best = current
+            self.counter = 0
+        else:
+            self.counter += 1
+        if self.counter >= self.patience:
+            print(f"Early stopping: no improvement in {self.patience} iterations.")
+            return True  # Returning True stops gp_minimize

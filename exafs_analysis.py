@@ -5,9 +5,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
+import pickle
+import re
 from textwrap import dedent
 from time import perf_counter as time
 import subprocess
+
+import networkx as nx
+from networkx.algorithms import isomorphism as iso
+
+from sklearn.cluster import HDBSCAN
+from sklearn.preprocessing import StandardScaler
 
 from ase.data import atomic_numbers
 from MDAnalysis.analysis.base import Results
@@ -36,6 +44,11 @@ def run(commands : list | str):
         out = subprocess.run(cmd, shell=True)
 
     return out
+
+
+def load_object(filename):
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
 
 
 def k2chi_axis(ion='Unspecified', xmin=1, xmax=6, ymin=-0.6, ymax=0.6, 
@@ -351,7 +364,7 @@ class EXAFS(ParallelAnalysisBase):
         print('-'*50)
 
 
-def feff_per_path(file_idx, files, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
+def feff_per_path(file_idx, files, k, params=None, scattering_paths=None, cluster_map=None, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
     '''
     Function to read a FEFF path file and calculate the chi(k) for a single path.
     
@@ -363,6 +376,15 @@ def feff_per_path(file_idx, files, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
         List of FEFF path files.
     k : np.ndarray
         k-space points at which to calculate chi(k).
+    params : np.ndarray, optional
+        Parameters for the FEFF calculation, structured as a 2D array with shape (n_files, 3).
+        Each row corresponds to a different path and contains [deltar, e0, sigma2]. Default is None,
+        which means the parameters will be used as specified with the below keywords.
+    scattering_paths : list of ScatteringPath objects, optional
+        List of ScatteringPath objects, each representing a scattering path with its associated cluster.
+    cluster_map : dict, optional
+        Dictionary mapping each cluster to a parameter index. This is used to determine which parameters
+        to apply to each path.
     deltar : float, optional
         Delta R parameter for the FEFF calculation. Default is 0.0.
     e0 : float, optional
@@ -380,6 +402,12 @@ def feff_per_path(file_idx, files, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
     '''
     
     file = files[file_idx]
+
+    if params is not None and scattering_paths is not None and cluster_map is not None:
+        mypath = scattering_paths[file_idx]  # get the ScatteringPath object for this file
+        parameter_idx = cluster_map[mypath.cluster_key]  # get the parameter index for this path
+        (deltar, e0, sigma2) = params[parameter_idx,:]
+
     path = xafs.feffpath(file, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
     xafs.path2chi(path, k=k) # calculate chi(k) for the path at the same points as experimental data
     k2chi = path.chi * path.k**2  # k^2 * chi(k)
@@ -420,10 +448,63 @@ def feff_average_paths_equal(params, k, njobs=1):
     else:
         n = njobs
     
-    # start_load = time()
     n_frames = len(glob('./frame*/chi.dat'))  # count number of frames
     paths = glob(f'./frame*/feff*.dat') # assumes FEFF files are named consistently within frameXXXX
     run_per_path = partial(feff_per_path, files=paths, k=k, deltar=deltar, e0=e0, sigma2=sigma2, s02=0.816)
+
+    with Pool(n) as worker_pool:
+        result = worker_pool.map(run_per_path, np.arange(len(paths)))
+
+    result = np.asarray(result) 
+    
+    return result.sum(axis=0) / n_frames  # sum over all paths, averaged over all frames
+
+
+def feff_average(params, k, scattering_paths, cluster_map, njobs=1):
+    '''
+    Function to average k^2*chi(k) from multiple FEFF calculations assuming all paths have different parameters
+    
+    Parameters
+    ----------
+    params : np.ndarray
+        Parameters for the FEFF calculations. These are structured as a 1D array as follows:
+        [cluster0_deltar, cluster0_e0, cluster0_sigma2,
+         cluster1_deltar, cluster1_e0, cluster1_sigma2, ...]
+        where each element corresponds to a different parameter in the chi(k) calculation.
+    scattering_paths : list of ScatteringPath objects
+        List of ScatteringPath objects, each representing a scattering path with its associated cluster.
+        Each ScatteringPath object should have a `cluster_key` attribute that maps to the cluster_map.
+    cluster_map : dict
+        Dictionary mapping each cluster to a parameter index. This is used to determine which parameters
+        to apply to each path.
+    k : np.ndarray
+        k-space points at which to calculate chi(k).
+    njobs : int, optional
+        Number of parallel jobs to run. Default is 1 (no parallelization).
+        If set to -1, it will use all available CPU cores.
+
+    Returns
+    -------
+    k2chi : np.ndarray
+        Averaged k^2*chi(k) values across all frames, structured as a 1D array with same shape as experiment.
+
+    '''
+
+    if isinstance(params, list):
+        # If using Bayesian optimization, params needs to be converted from a list to a numpy array
+        params = np.asarray(params)        
+
+
+    # parallelize
+    if njobs == -1:
+        n = multiprocessing.cpu_count()
+    else:
+        n = njobs
+    
+    n_frames = len(glob('./frame*/chi.dat'))  # count number of frames
+    paths = sorted(glob(f'./frame*/feff*.dat')) # assumes FEFF files are named consistently within frameXXXX
+    params = params.reshape(-1,3)  # convert params to a 2D array with shape (n_clusters, 3)
+    run_per_path = partial(feff_per_path, files=paths, k=k, params=params, s02=0.816, cluster_map=cluster_map, scattering_paths=scattering_paths)
 
     with Pool(n) as worker_pool:
         result = worker_pool.map(run_per_path, np.arange(len(paths)))
@@ -457,7 +538,7 @@ def R_factor(calc_data, exp_data):
     return R
 
 
-def opt_func(params, exp_data, k, loss=R_factor, **kwargs):
+def opt_func(params, exp_data, k, feff_func=feff_average_paths_equal, loss=R_factor, **kwargs):
     '''
     Function to optimize for the best fit of the average k2chi
     
@@ -470,8 +551,11 @@ def opt_func(params, exp_data, k, loss=R_factor, **kwargs):
         number of k-space points in the experimental data.
     k : np.ndarray
         k-space points at which to calculate chi(k).
+    feff_func : callable, optional
+        Function to calculate the k^2*chi(k) from FEFF paths. Default is feff_average_paths_equal.
+        This function should take parameters, k, and any additional keyword arguments.
     loss : callable, optional
-        Loss function to minimize. Default is mean_squared_error.
+        Loss function to minimize. Default is R_factor.
     **kwargs : dict, optional
         Additional keyword arguments to pass to the feff_average function.
 
@@ -482,7 +566,7 @@ def opt_func(params, exp_data, k, loss=R_factor, **kwargs):
         
     '''
     
-    k2chi = feff_average_paths_equal(params, k=k, **kwargs)
+    k2chi = feff_func(params, k=k, **kwargs)
 
     if np.any(np.isnan(k2chi)) or np.any(np.isinf(k2chi)):
         return 1e6  # Large penalty for invalid results
@@ -494,19 +578,314 @@ def opt_func(params, exp_data, k, loss=R_factor, **kwargs):
 
 
 class EarlyStopper:
-    def __init__(self, tol=1e-4, patience=10):
+    '''
+    Early stopping callback for optimization routines.
+    This class monitors the loss function during optimization and raises a StopIteration exception
+    if the loss does not improve for a specified number of iterations (patience).
+
+    Parameters
+    ----------
+    tol : float, optional
+        Tolerance for improvement in the loss function. Default is 1e-4.
+    patience : int, optional
+        Number of iterations to wait for an improvement before stopping. Default is 10.
+    verbose : int, optional
+        Levels for verbosity. Default is 0.
+        - 0: no output
+        - 1: prints the iteration number
+        - 2: prints the iteration number and function value
+        - 3: prints the iteration number, function value, and parameters
+
+    Attributes
+    ----------
+    best : float
+        Best value of the loss function observed so far.
+    counter : int
+        Counter for the number of iterations without improvement.
+    iteration : int
+        Current iteration number, starting from 1.
+    
+    '''
+    
+    def __init__(self, tol=1e-4, patience=10, verbose=0):
         self.tol = tol
         self.patience = patience
         self.best = np.inf
         self.counter = 0
+        self.verbose = verbose
+        self.iteration = 1
 
-    def __call__(self, res):
-        current = np.min(res.func_vals)
+    def __call__(self, intermediate_result):
+        if self.verbose == 1:
+            print(f'Iteration: {self.iteration}')
+        elif self.verbose == 2:
+            print(f'Iteration: {self.iteration}, function value: {intermediate_result.fun:.6e}')
+        elif self.verbose == 3:
+            print(f'Iteration: {self.iteration}, function value: {intermediate_result.fun:.6e}, parameters: {intermediate_result.x}')
+        self.iteration += 1
+
+        # Save a checkpoint with the current best parameters and intermediate result object
+        np.savetxt('./.bayes_params.txt', intermediate_result.x, fmt='%.8f')
+        with open(f'./bayes_checkpoint.pl', 'wb') as output:
+            pickle.dump(intermediate_result, output, pickle.HIGHEST_PROTOCOL)
+
+        # Check if the current result is better than the best observed
+        current = np.min(intermediate_result.fun)
         if current < self.best - self.tol:
             self.best = current
             self.counter = 0
         else:
             self.counter += 1
         if self.counter >= self.patience:
-            print(f"Early stopping: no improvement in {self.patience} iterations.")
-            return True  # Returning True stops gp_minimize
+            raise StopIteration("Early stopping triggered due to no improvement in loss function.")
+
+
+class Atom:
+    '''
+    Class to represent an atom from the FEFF calculation.
+    
+    From a line in the FEFF paths.dat file.
+    '''
+
+    def __init__(self, line):
+        atom_line = line.strip()
+        atom_parts = atom_line.split()
+        x,y,z = map(float, atom_parts[:3])
+        self.xyz = np.array([x, y, z])
+        self.ipot = int(atom_parts[3])
+        self.label = atom_parts[4].strip("' ")
+        self._rleg = float(atom_parts[6])
+        self.beta = float(atom_parts[7])
+        self.eta = float(atom_parts[8])
+
+    def __repr__(self):
+        return f"{self.label} at {self.xyz}"
+    
+
+    def __hash__(self): # in case you want to use this as a node
+        return hash((self.label, tuple(self.xyz)))
+
+
+def build_graph_from_atoms(G, atoms):
+    '''
+    Build a NetworkX directed graph from a list of Atom objects.
+    
+    Each atom is a node, and edges are the rleg length of the scattering path.
+    '''
+
+    coord_to_node = {} # need a mapping from coordinates to node indices
+    node_sequence = [] # sequence of node indices in the path
+    node_counter = 0
+
+    # add nodes to the graph
+    for atom in atoms:
+        
+        coord = tuple(atom.xyz)  # use tuple for immutability in dict keys
+        if coord in coord_to_node: # reuse existing node if coordinates match
+            node_idx = coord_to_node[coord]
+        else:
+            node_idx = node_counter
+            coord_to_node[coord] = node_idx
+            G.add_node(node_idx, label=atom.label, xyz=atom.xyz, 
+                    ipot=atom.ipot, beta=atom.beta, eta=atom.eta)
+            node_counter += 1
+
+        node_sequence.append(node_idx)
+
+    # add edges to the graph, weights are the rleg values
+    edges = [(node_sequence[idx-1],node_sequence[idx],atoms[idx-1]._rleg) for idx in range(1,len(node_sequence))] + [(node_sequence[-1],node_sequence[0],atoms[-1]._rleg)]  # add last edge to first node to close the path
+    G.add_weighted_edges_from(edges)
+    
+    return G
+
+
+def parse_paths(filename):
+    graphs = []
+    with open(filename) as f:
+        lines = f.readlines()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        m = re.match(r'^(\d+)\s+(\d+)\s+([\d.]+)\s+index, nleg, degeneracy, r=\s*([\d.]+)', line)
+        if m: # start of a path definition
+
+            # Extract path index, number of legs, degeneracy, and r
+            path_index = int(m.group(1))
+            nleg = int(m.group(2))
+            degeneracy = float(m.group(3))
+            r = float(m.group(4))
+            
+            i += 2  # skip to first atom line
+            atoms = []
+            for atom_idx in range(nleg): # create a list of all Atoms that are in the path
+                atoms.append(Atom(lines[i]))
+                i += 1
+                
+            # Build directed graph for this path, reusing nodes with same xyz
+            G = nx.DiGraph(path_index=path_index, nleg=nleg, degeneracy=degeneracy, r=r, filename=filename)
+            G = build_graph_from_atoms(G, atoms)
+            
+            graphs.append(G)
+
+        else: # not a path definition, just skip to the next line
+            i += 1
+
+    return graphs
+
+
+def plot_path_graph(G):
+    # Extract positions from node attributes
+    pos = {n: (d['xyz'][0], d['xyz'][1]) for n, d in G.nodes(data=True)}
+    labels = {n: d['label'] for n, d in G.nodes(data=True)}
+    
+    plt.figure(figsize=(2, 2))
+    nx.draw(G, pos, with_labels=True, labels=labels, node_color='lightblue', node_size=500)
+    nx.draw_networkx_edge_labels(G, pos)
+    plt.title(f"Path index: {G.graph.get('path_index', 'N/A')}")
+    plt.show()
+
+
+def get_paths_and_clusters(path_files):
+    '''
+    Function to read in paths from the FEFF calculation and determine isomorph groups and clusters.
+    This function reads the paths.dat files, creates graphs for each scattering path, determines isomorph groups,
+    and clusters the paths based on their edge weights and node attributes.
+
+    Parameters
+    ----------
+    path_files : list of str
+        List of paths.dat files to read in. Each file corresponds to a frame of the FEFF calculation.
+        Each file should be named in the format 'frameXXXX/paths.dat', where XXXX is the frame index.
+
+    Returns
+    -------
+    paths : list of ScatteringPath objects
+        List of ScatteringPath objects, each representing a scattering path with its associated graph.
+    cluster_map : dict
+        Dictionary mapping each unique cluster key to a unique index. The keys are tuples of (isomorph_group, cluster).
+
+    '''
+
+    # read in paths and create graphs for each scattering path
+    paths = []
+    for path in path_files:
+        graphs = parse_paths(path)
+        frame = int(re.search(r'frame(\d+)', path).group(1))  # extract frame index from filename
+        for g in graphs: # loop over each path in the paths.dat file
+            mypath = ScatteringPath(frame_idx=frame, path_idx=g.graph['path_index'])
+            mypath.graph = g  # attach the graph to the ScatteringPath object
+            paths.append(mypath)
+
+    # determine isomorph groups of graphs
+    # Use NetworkX's isomorphism module to find isomorphic graphs
+    # Create a node matcher that matches nodes based on their 'label' attribute, aka atom identity
+    atom_matcher = iso.categorical_node_match('label', 'unknown')
+    isomorph_groups = []
+
+    for path in paths:
+        g = path.graph  # get the graph from the ScatteringPath object
+        found_group = False
+        for idx,group in enumerate(isomorph_groups):
+            # Compare with the first graph in the group (representative)
+            if iso.is_isomorphic(g, group[0], node_match=atom_matcher):
+                group.append(g)
+                path.isomorph_group = idx  # assign the isomorph group index
+                found_group = True
+                break
+        if not found_group:
+            isomorph_groups.append([g])
+            path.isomorph_group = len(isomorph_groups) - 1  # assign the new group index
+
+    # Now we have isomorph groups, we can create a DataFrame for each group
+    # Each DataFrame contains edge weights and node attributes
+    group_dataframes = []
+    group_paths = []  # Keep track of ScatteringPath objects for each group
+
+    for group in isomorph_groups:   
+        rows = []
+        paths_in_group = []
+        for g in group:
+            row = {}
+            # Edge weights
+            for i, (u, v, d) in enumerate(g.edges(data=True)):
+                row[f'edge{i}'] = d.get('weight', None)
+            # Node eta and beta
+            for i, (n, d) in enumerate(g.nodes(data=True)):
+                # row[f'eta{i}'] = d.get('eta', None) # ignore eta for now
+                row[f'beta{i}'] = d.get('beta', None)
+        
+            rows.append(row)
+            # Find the ScatteringPath object corresponding to this graph
+            for p in paths:
+                if p.graph is g:
+                    paths_in_group.append(p)
+                    break
+
+        df = pd.DataFrame(rows)
+        group_dataframes.append(df)
+        group_paths.append(paths_in_group)
+
+    # cluster the paths based on the edge and node attributes
+    # these clusters will be the distinct paths for optimization
+    n_clusters = 0
+    for idx, df in enumerate(group_dataframes):
+        paths_in_group = group_paths[idx]
+        if len(df) > 5:
+            # Scale the data
+            scaler = StandardScaler()
+            df_scaled = scaler.fit_transform(df)
+            
+            # Run HDBSCAN
+            cluster = HDBSCAN()
+            labels = cluster.fit_predict(df_scaled)
+            n_clusters += len(set(labels))
+
+            # assign cluster labels to the ScatteringPath objects
+            for path_obj, label in zip(paths_in_group, labels):
+                path_obj.cluster = int(label)
+
+        else: # if there are not enough paths, assign them all to one cluster
+            for path_obj in paths_in_group:
+                path_obj.cluster = 0
+            n_clusters += 1
+
+    print(f"Total number of clusters: {n_clusters}")
+
+    # Create a map from each unique cluster_key to a unique index
+    cluster_keys = set(p.cluster_key for p in paths)
+    cluster_map = {key: idx for idx, key in enumerate(sorted(cluster_keys))}
+
+    return paths, cluster_map
+
+
+class ScatteringPath:
+    '''
+    Class to represent a scattering path from the FEFF calculation.
+    '''
+
+    def __init__(self, frame_idx=None, path_idx=None):
+        
+        if frame_idx is None or path_idx is None:
+            raise ValueError("Both frame_idx and path_idx must be provided to initialize ScatteringPath.")
+        
+        self.frame = frame_idx
+        self.path = path_idx
+        self.filename = f'./frame{frame_idx:04d}/feff{path_idx:04d}.dat'
+        
+        # initalize other data to add
+        self.graph = None
+        self.isomorph_group = None
+        self.cluster = None
+
+
+    def __repr__(self):
+        return f'ScatteringPath(frame={self.frame}, path={self.path})'
+
+
+    @property
+    def cluster_key(self):
+        '''Unique key for the cluster parameters'''
+        return (self.isomorph_group, self.cluster)
+    
+

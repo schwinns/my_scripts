@@ -31,6 +31,8 @@ import multiprocessing
 from multiprocessing import Pool
 from functools import partial
 
+from tqdm import tqdm
+
 import warnings
 warnings.simplefilter("ignore", SyntaxWarning)
 
@@ -414,7 +416,7 @@ def feff_per_path(file_idx, files, k, params=None, scattering_paths=None, cluste
     return k2chi
             
 
-def feff_average_paths_equal(params, k, njobs=1):
+def feff_average_paths_equal(params, k, filepath='./frame*/', njobs=1):
     '''
     Function to average k^2*chi(k) from multiple FEFF calculations assuming all paths have the same parameters
     
@@ -426,6 +428,8 @@ def feff_average_paths_equal(params, k, njobs=1):
         where each element corresponds to a different parameter in the chi(k) calculation.
     k : np.ndarray
         k-space points at which to calculate chi(k).
+    filepath : str, optional
+        Path to the directory containing the FEFF files. Default is './frames*/'.
     njobs : int, optional
         Number of parallel jobs to run. Default is 1 (no parallelization).
         If set to -1, it will use all available CPU cores.
@@ -447,13 +451,19 @@ def feff_average_paths_equal(params, k, njobs=1):
         n = multiprocessing.cpu_count()
     else:
         n = njobs
+
+    # format filepath
+    if not filepath.endswith('/'):
+        filepath += '/'
     
-    n_frames = len(glob('./frame*/chi.dat'))  # count number of frames
-    paths = glob(f'./frame*/feff*.dat') # assumes FEFF files are named consistently within frameXXXX
+    n_frames = len(glob(f'{filepath}chi.dat'))  # count number of frames
+    paths = sorted(glob(f'{filepath}feff*.dat')) # assumes FEFF files are named consistently within frameXXXX
     run_per_path = partial(feff_per_path, files=paths, k=k, deltar=deltar, e0=e0, sigma2=sigma2, s02=0.816)
 
     with Pool(n) as worker_pool:
-        result = worker_pool.map(run_per_path, np.arange(len(paths)))
+        result = []
+        for r in tqdm(worker_pool.imap_unordered(run_per_path, np.arange(len(paths))), total=len(paths), desc='Processing paths'):
+            result.append(r)
 
     result = np.asarray(result) 
     
@@ -507,7 +517,9 @@ def feff_average(params, k, scattering_paths, cluster_map, njobs=1):
     run_per_path = partial(feff_per_path, files=paths, k=k, params=params, s02=0.816, cluster_map=cluster_map, scattering_paths=scattering_paths)
 
     with Pool(n) as worker_pool:
-        result = worker_pool.map(run_per_path, np.arange(len(paths)))
+        result = []
+        for r in tqdm(worker_pool.imap_unordered(run_per_path, np.arange(len(paths))), total=len(paths), desc='Processing paths'):
+            result.append(r)
 
     result = np.asarray(result) 
     
@@ -887,5 +899,5 @@ class ScatteringPath:
     def cluster_key(self):
         '''Unique key for the cluster parameters'''
         return (self.isomorph_group, self.cluster)
-    
+
 

@@ -416,7 +416,7 @@ def feff_per_path(file_idx, files, k, params=None, scattering_paths=None, cluste
     return k2chi
             
 
-def feff_average_paths_equal(params, k, filepath='./frame*/', njobs=1):
+def feff_average_paths_equal(params, k, filepath='./frame*/', top_paths=-1, sort_by_amp_ratio=False, njobs=1):
     '''
     Function to average k^2*chi(k) from multiple FEFF calculations assuming all paths have the same parameters
     
@@ -430,6 +430,11 @@ def feff_average_paths_equal(params, k, filepath='./frame*/', njobs=1):
         k-space points at which to calculate chi(k).
     filepath : str, optional
         Path to the directory containing the FEFF files. Default is './frames*/'.
+    top_paths : int
+        Number of top paths to consider for averaging. Default is -1, which means all paths are considered.
+    sort_by_amp_ratio : bool, optional
+        If True, the paths will be sorted by their amplitude ratio before selecting the top paths.
+        Default is False.
     njobs : int, optional
         Number of parallel jobs to run. Default is 1 (no parallelization).
         If set to -1, it will use all available CPU cores.
@@ -458,6 +463,19 @@ def feff_average_paths_equal(params, k, filepath='./frame*/', njobs=1):
     
     n_frames = len(glob(f'{filepath}chi.dat'))  # count number of frames
     paths = sorted(glob(f'{filepath}feff*.dat')) # assumes FEFF files are named consistently within frameXXXX
+
+    if top_paths != -1:
+        paths = []
+        for i in range(n_frames):
+            frame_pattern = filepath.replace('frame*/', f'frame{i:04d}/')  # replace 'frame*/' with 'frameXXXX/'
+            files = read_files(f'{frame_pattern}files.dat')  # read files.dat
+            
+            if sort_by_amp_ratio:
+                files.sort_values('amp_ratio', inplace=True, ascending=False) # get the paths with highest amp_ratio
+            
+            frame_paths = [f'{frame_pattern}{f}' for f in files.file.values[:top_paths]]
+            paths.extend(frame_paths)
+
     run_per_path = partial(feff_per_path, files=paths, k=k, deltar=deltar, e0=e0, sigma2=sigma2, s02=0.816)
 
     with Pool(n) as worker_pool:
@@ -899,5 +917,40 @@ class ScatteringPath:
     def cluster_key(self):
         '''Unique key for the cluster parameters'''
         return (self.isomorph_group, self.cluster)
+
+
+def read_files(filename):
+    '''
+    Read files.dat file and return a DataFrame
+    
+    Parameters
+    ----------
+    filename : str
+        Path to the files.dat file.
+
+    Returns
+    -------
+    df : pd.DataFrame
+        DataFrame containing the file paths and their corresponding frame and path indices.
+        The DataFrame has columns "file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective".
+    
+    '''
+
+    # Find the line after the separator (-------)
+    with open(filename) as f:
+        for i, line in enumerate(f):
+            if set(line.strip()) == {"-"}:
+                header_line = i + 1
+                break
+
+    # Read the table
+    df = pd.read_csv(
+        filename,
+        delim_whitespace=True,
+        skiprows=header_line + 1,
+        names=["file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective"]
+    )
+
+    return df
 
 

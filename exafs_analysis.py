@@ -93,6 +93,11 @@ def list2str(lst):
     return ' '.join(lst)
 
 
+def find_files_dat_files(base_path):
+    '''Recursively find all files.dat files under base_path.'''
+    return glob(os.path.join(base_path, '**', 'files.dat'), recursive=True)
+
+
 def write_feff(potentials, atoms, title='FEFF8.5 input',  edge='K', s02=1.0, kmax=20, 
                print_vals=[0,0,0,0,0,3], control=[1,1,1,1,1,1], exchange=[0,0.0,0.0], 
                cfaverage=[0,1,0], scf=[6,0,30,0.2], ion=[], tdlda=0, debye=[], rpath=None,
@@ -416,7 +421,7 @@ def feff_per_path(file_idx, files, k, params=None, scattering_paths=None, cluste
     return k2chi
             
 
-def feff_average_paths_equal(params, k, filepath='./frame*/', top_paths=-1, sort_by_amp_ratio=False, njobs=1):
+def feff_average_paths_equal(params, k, filepath='./frame*/', top_paths=-1, sort_by_amp_ratio=False, njobs=1, progress_bar=True):
     '''
     Function to average k^2*chi(k) from multiple FEFF calculations assuming all paths have the same parameters
     
@@ -438,6 +443,8 @@ def feff_average_paths_equal(params, k, filepath='./frame*/', top_paths=-1, sort
     njobs : int, optional
         Number of parallel jobs to run. Default is 1 (no parallelization).
         If set to -1, it will use all available CPU cores.
+    progress_bar : bool, optional
+        If True, a progress bar will be displayed during the processing of paths. Default is True
 
     Returns
     -------
@@ -461,27 +468,38 @@ def feff_average_paths_equal(params, k, filepath='./frame*/', top_paths=-1, sort
     if not filepath.endswith('/'):
         filepath += '/'
     
-    n_frames = len(glob(f'{filepath}chi.dat'))  # count number of frames
-    paths = sorted(glob(f'{filepath}feff*.dat')) # assumes FEFF files are named consistently within frameXXXX
+    # Find all files.dat files recursively
+    files_dat_list = find_files_dat_files(filepath)
+    n_frames = len(files_dat_list) # count number of frames
 
-    if top_paths != -1:
-        paths = []
-        for i in range(n_frames):
-            frame_pattern = filepath.replace('frame*/', f'frame{i:04d}/')  # replace 'frame*/' with 'frameXXXX/'
-            files = read_files(f'{frame_pattern}files.dat')  # read files.dat
-            
-            if sort_by_amp_ratio:
-                files.sort_values('amp_ratio', inplace=True, ascending=False) # get the paths with highest amp_ratio
-            
-            frame_paths = [f'{frame_pattern}{f}' for f in files.file.values[:top_paths]]
-            paths.extend(frame_paths)
+    paths = []
+    for files_dat in files_dat_list:
+
+        try:
+            files = read_files(files_dat)
+        except:
+            print(f'Error reading {files_dat}, skipping...')
+            n_frames -= 1 # decrement frame count if this file cannot be read
+            continue
+        
+        if sort_by_amp_ratio:
+            files.sort_values('amp_ratio', inplace=True, ascending=False) # get the paths with highest amp_ratio
+        
+        frame_dir = os.path.dirname(files_dat)
+        frame_paths = [os.path.join(frame_dir, f) for f in files.file.values[:top_paths]] if top_paths != -1 else [os.path.join(frame_dir, f) for f in files.file.values]
+        paths.extend(frame_paths)
 
     run_per_path = partial(feff_per_path, files=paths, k=k, deltar=deltar, e0=e0, sigma2=sigma2, s02=0.816)
 
-    with Pool(n) as worker_pool:
-        result = []
-        for r in tqdm(worker_pool.imap_unordered(run_per_path, np.arange(len(paths))), total=len(paths), desc='Processing paths'):
-            result.append(r)
+    if progress_bar:
+        with Pool(n) as worker_pool:
+            result = []
+            for r in tqdm(worker_pool.imap_unordered(run_per_path, np.arange(len(paths))), total=len(paths), desc='Processing paths'):
+                result.append(r)
+
+    else:
+        with Pool(n) as worker_pool:
+            result = worker_pool.map(run_per_path, np.arange(len(paths)))
 
     result = np.asarray(result) 
     
@@ -587,7 +605,7 @@ def opt_func(params, exp_data, k, feff_func=feff_average_paths_equal, loss=R_fac
     loss : callable, optional
         Loss function to minimize. Default is R_factor.
     **kwargs : dict, optional
-        Additional keyword arguments to pass to the feff_average function.
+        Additional keyword arguments to pass to the feff_func function.
 
     Returns
     -------

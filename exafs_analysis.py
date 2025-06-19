@@ -21,6 +21,7 @@ from ase.data import atomic_numbers
 from MDAnalysis.analysis.base import Results
 
 from larch import xafs
+from larch import Group
 from ParallelMDAnalysis import ParallelAnalysisBase
 
 # from skopt import gp_minimize
@@ -972,3 +973,40 @@ def read_files(filename):
     return df
 
 
+def k2chi_to_chiR(k, k2chi, kmin=2.5, kmax=8, dk=1):
+    '''
+    Convert k^2*chi(k) to chi(R) using the Fourier transform. Default parameters are set for Rb analysis
+    from Sasha.
+    
+    Parameters
+    ----------
+    k : np.ndarray
+        k-space points at which k^2*chi(k) is defined.
+    k2chi : np.ndarray
+        k^2*chi(k) values corresponding to the k points.
+    kmin : float, optional
+        Minimum k value for the Fourier transform. Default is 2.5.
+    kmax : float, optional
+        Maximum k value for the Fourier transform. Default is 8.
+    dk : float, optional
+        Step size in k for the Fourier transform. Default is 1.
+
+    Returns
+    -------
+    R : np.ndarray
+        Real space distances.
+    chiR : np.ndarray
+        chi(R) values corresponding to the R distances.
+    
+    '''
+    
+    chi = k2chi / k**2  # convert k^2*chi(k) to chi(k)
+    chi[np.isnan(chi)] = 0  # replace NaNs with 0
+
+    grp = Group(k=k, chi=chi)
+    xafs.xftf(grp.k, grp.chi, group=grp, kmin=kmin, kmax=kmax, dk=dk, kweight=2, window='hanning')  # perform Fourier transform
+
+    R = grp.r
+    chiR = grp.chir_mag
+    
+    return R, chiR

@@ -63,7 +63,7 @@ def k2chi_axis(ion='Unspecified', xmin=1, xmax=6, ymin=-0.6, ymax=0.6,
     ax.axhline(0, color='gray', lw=0.5)
     ax.set_xlabel('$k$ (1/$\AA$)')
     ax.set_ylabel(f'$k^2 \chi(k)$ around {ion}')
-    ax.set_xticks(np.arange(0, 10, 1))
+    ax.set_xticks(np.arange(0, 40, 1))
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.xaxis.set_minor_locator(MultipleLocator(xtick))
@@ -71,7 +71,7 @@ def k2chi_axis(ion='Unspecified', xmin=1, xmax=6, ymin=-0.6, ymax=0.6,
     return ax
 
 
-def chiR_axis(ion='Unspecified', xmin=0, xmax=6, ymin=-0.6, ymax=0.6, 
+def chiR_axis(ion='Unspecified', xmin=0, xmax=6, ymin=0, ymax=0.6, 
                xtick=0.2, ytick=0.05, ax=None):
     
     if ax is None:
@@ -80,7 +80,7 @@ def chiR_axis(ion='Unspecified', xmin=0, xmax=6, ymin=-0.6, ymax=0.6,
     ax.axhline(0, color='gray', lw=0.5)
     ax.set_xlabel('$R$ ($\AA$)')
     ax.set_ylabel(f'|$\chi(R)$| ($\AA^{-3}$) around {ion}')
-    ax.set_xticks(np.arange(0, 10, 1))
+    ax.set_xticks(np.arange(0, 40, 1))
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.xaxis.set_minor_locator(MultipleLocator(xtick))
@@ -370,6 +370,322 @@ class EXAFS(ParallelAnalysisBase):
         seconds = int(total_time % 60)
         print(f'\nTotal time:'.ljust(25) + f'{hours:d}:{minutes:d}:{seconds:d}'.rjust(25))
         print('-'*50)
+
+
+class Averager:
+    '''
+    Class to calculate the average k^2*chi(k) from multiple FEFF path files.
+    
+    Attributes
+    ----------
+    deltar : float
+        DeltaR parameter for the FEFF calculation.
+    e0 : float
+        E0 parameter for the FEFF calculation.
+    sigma2 : float
+        Sigma^2 parameter for the FEFF calculation.
+    s02 : float
+        S0^2 parameter for the FEFF calculation, default is 0.816 (for Rb from Sasha).
+    njobs : int
+        Number of parallel jobs to run.
+    progress_bar : bool
+        Whether to show a progress bar during processing.
+    files : pd.DataFrame
+        DataFrame containing the file paths and their corresponding information from files.dat.
+    paths : list of ScatteringPath objects
+        List of ScatteringPath objects containing the FEFF path data.
+    n_frames : int
+        Number of frames.
+    n_paths : int
+        Number of paths.
+
+    Methods
+    -------
+    average(paths)
+        Calculate the average k^2*chi(k) from multiple FEFF path files.
+    remove_hydrogen_paths()
+        Remove paths that contain hydrogen atoms from the list of paths and update the files DataFrame.
+
+
+    '''
+
+
+    def __init__(self, frames, frame_dir='./', deltar=0, e0=0, sigma2=0, s02=0.816, include_hydrogen=False, njobs=1, progress_bar=False):
+        '''
+        Initialize the Averager class.
+
+        Parameters
+        ----------
+        frames : np.ndarray
+            Array of frame indices to be averaged.
+        deltar : float, optional
+            DeltaR parameter for the FEFF calculation. Default is 0.0.
+        e0 : float, optional
+            E0 parameter for the FEFF calculation. Default is 0.0.
+        sigma2 : float, optional
+            Sigma^2 parameter for the FEFF calculation. Default is 0.0.
+        s02 : float, optional
+            S0^2 parameter for the FEFF calculation. Default is 0.816, which is for Rb from Sasha.
+        include_hydrogen : bool, optional
+            Whether to include paths that contain hydrogen atoms. Default is False.
+        njobs : int, optional
+            Number of parallel jobs to run. Default is 1. If -1, uses all available CPU cores.
+        progress_bar : bool, optional
+            Whether to show a progress bar during processing. Default is False.
+
+        '''
+        
+        self.deltar = deltar
+        self.e0 = e0
+        self.sigma2 = sigma2
+        self.s02 = s02
+        self.progress_bar = progress_bar
+        
+        if njobs == -1:
+            self.njobs = os.cpu_count()
+        else:
+            self.njobs = njobs
+
+        if not os.path.isdir(frame_dir):
+            raise FileNotFoundError(f"Directory {frame_dir} does not exist.")
+
+        # read in all frame information
+        dfs = []
+        self.paths = []  # list of ScatteringPath objects
+        for frame in frames:
+            frame_path = os.path.join(frame_dir, f'frame{frame:04d}')
+            if not os.path.isdir(frame_path):
+                raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
+
+            df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
+            df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
+            df['frame'] = frame  # add a frame column for reference
+            df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
+            dfs.append(df)
+
+            self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
+            file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
+            for g in self._graphs:
+                file = file_map.get(g.graph["path_index"])
+                if file:
+                    self.paths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
+
+        self.files = pd.concat(dfs, ignore_index=True) # save files.dat from all frames in a single DataFrame
+        self.files['paths'] = self.paths
+        self.n_frames = len(frames)
+
+        if not include_hydrogen:
+            self.remove_hydrogen_paths()
+        
+
+    def __repr__(self):
+        return f'Averager with {self.n_paths} paths across {self.n_frames} frames'
+    
+
+    def __str__(self):
+        return self.__repr__()
+    
+
+    @property
+    def n_paths(self):
+        return len(self.paths)
+    
+
+    def average(self, k, paths=None, njobs=None):
+        '''
+        Calculate the average k^2*chi(k) from multiple FEFF path files.
+
+        Parameters
+        ----------
+        k : np.ndarray
+            k-space points at which to calculate chi(k).
+        paths : list of ScatteringPath objects, optional
+            List of ScatteringPath objects containing the FEFF path data. Default is None, which uses the `paths` attribute.
+        njobs : int, optional
+            Number of parallel jobs to run. Default is None, which uses the `njobs` attribute. If this is specified, it overrides
+            the class attribute.
+        
+        Returns
+        -------
+        k2chi_avg : np.ndarray
+            Average k^2*chi(k) across all frames.
+
+        '''
+
+        if paths is None:
+            paths = self.paths
+
+        if njobs is not None:
+            self.njobs = njobs
+
+        run_per_path = partial(self._feff_per_path, paths=paths, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
+
+        if self.progress_bar:
+            with Pool(self.njobs) as worker_pool:
+                result = []
+                for r in tqdm(worker_pool.imap_unordered(run_per_path, np.arange(len(paths))), total=len(paths), desc='Processing paths'):
+                    result.append(r)
+
+        else:
+            with Pool(self.njobs) as worker_pool:
+                result = worker_pool.map(run_per_path, np.arange(len(paths)))
+
+        result = np.asarray(result) 
+        
+        return result.sum(axis=0) / self.n_frames
+    
+
+    def remove_hydrogen_paths(self):
+        '''
+        Remove paths that contain hydrogen atoms from the list of paths and update the files DataFrame.
+        
+        This method modifies the `paths` attribute in place, removing any paths that contain hydrogen atoms,
+        and also removes corresponding entries from the `files` DataFrame attribute.
+        '''
+        
+        to_remove = []
+        for p in self.paths:
+            for atom in p.atoms:
+                if atom['label'] == 'H':
+                    to_remove.append(p.filename)
+                    self.paths.remove(p)
+                    break
+
+        # Remove rows from self.files where 'file' is in to_remove
+        if to_remove:
+            self.files = self.files[~self.files['file'].isin(to_remove)].reset_index(drop=True)
+
+
+    def update_paths(self, files=None):
+        '''
+        Update the paths based on the files.dat information. Either you can directly edit the `files` attribute then run this method,
+        or you can pass a DataFrame with the same columns as the `files` attribute. This allows you to filter the paths based on efficient
+        pandas operations on the files.dat information.
+
+        For example, if you only want the paths with 100% amplitude ratio, you can do:
+        >>> Averager.update_paths(Averager.files.query('amp_ratio == 1.0'))
+
+        Parameters
+        ----------
+        files : pd.DataFrame, optional
+            DataFrame that looks like the `files` attribute, i.e. with the same columns. Note that this option overrides the `files` attribute.
+            If None, it uses the `files` attribute. Default is None.
+
+        '''
+
+        if isinstance(files, pd.DataFrame):
+            if set(files.columns) != set(self.files.columns):
+                raise ValueError("The new DataFrame does not have the same columns as the `files` attribute.")
+            
+            self.files = files  # directly set the files attribute if a DataFrame is passed
+
+        self.paths = self.files['paths'].to_list()  # update paths based on the files DataFrame
+    
+
+    def _graphs_from_paths_dat(self, filename):
+        graphs = []
+        with open(filename) as f:
+            lines = f.readlines()
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            m = re.match(r'^(\d+)\s+(\d+)\s+([\d.]+)\s+index, nleg, degeneracy, r=\s*([\d.]+)', line)
+            if m: # start of a path definition
+
+                # Extract path index, number of legs, degeneracy, and r
+                path_index = int(m.group(1))
+                nleg = int(m.group(2))
+                degeneracy = float(m.group(3))
+                r = float(m.group(4))
+                
+                i += 2  # skip to first atom line
+                atoms = []
+                for atom_idx in range(nleg): # create a list of all Atoms that are in the path
+                    atoms.append(Atom(lines[i]))
+                    i += 1
+                    
+                # Build directed graph for this path, reusing nodes with same xyz
+                G = nx.DiGraph(path_index=path_index, nleg=nleg, degeneracy=degeneracy, r=r, filename=filename)
+                G = build_graph_from_atoms(G, atoms)
+                
+                graphs.append(G)
+
+            else: # not a path definition, just skip to the next line
+                i += 1
+
+        return graphs
+
+
+    def _read_files_dat(self, filename):
+        '''
+        Read files.dat file and return a DataFrame
+        
+        Parameters
+        ----------
+        filename : str
+            Path to the files.dat file.
+
+        Returns
+        -------
+        df : pd.DataFrame
+            DataFrame containing the file paths and their corresponding frame and path indices.
+            The DataFrame has columns "file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective".
+        
+        '''
+
+        # Find the line after the separator (-------)
+        with open(filename) as f:
+            for i, line in enumerate(f):
+                if set(line.strip()) == {"-"}:
+                    header_line = i + 1
+                    break
+
+        # Read the table
+        df = pd.read_csv(
+            filename,
+            delim_whitespace=True,
+            skiprows=header_line + 1,
+            names=["file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective"]
+        )
+
+        return df
+
+
+    def _feff_per_path(self, idx, paths, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
+        '''
+        Function to read a FEFF path file and calculate the chi(k) for a single path.
+        
+        Parameters
+        ----------
+        idx : int
+            Index of the FEFF path file from a list of file paths.
+        paths : list of ScatteringPath objects
+            List of ScatteringPath objects containing the FEFF path data.
+        k : np.ndarray
+            k-space points at which to calculate chi(k).
+        deltar : float, optional
+            Delta R parameter for the FEFF calculation. Default is 0.0.
+        e0 : float, optional
+            E0 parameter for the FEFF calculation. Default is 0.0.
+        sigma2 : float, optional
+            Sigma^2 parameter for the FEFF calculation. Default is 0.0.
+        s02 : float, optional
+            S0^2 parameter for the FEFF calculation. Default is 1.0.
+
+        Returns
+        -------
+        k2chi : np.ndarray
+            Calculated k^2*chi(k) for the given FEFF path.
+        
+        '''
+        
+        path = paths[idx]
+        p = xafs.feffpath(path.filename, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
+        xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
+        k2chi = p.chi * p.k**2  # k^2 * chi(k)
+        path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
+        return k2chi
 
 
 def feff_per_path(file_idx, files, k, params=None, scattering_paths=None, cluster_map=None, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
@@ -913,29 +1229,40 @@ class ScatteringPath:
     Class to represent a scattering path from the FEFF calculation.
     '''
 
-    def __init__(self, frame_idx=None, path_idx=None):
+    def __init__(self, path_index, filename, graph=None):
         
-        if frame_idx is None or path_idx is None:
-            raise ValueError("Both frame_idx and path_idx must be provided to initialize ScatteringPath.")
-        
-        self.frame = frame_idx
-        self.path = path_idx
-        self.filename = f'./frame{frame_idx:04d}/feff{path_idx:04d}.dat'
+        self.path = path_index
+        self.filename = filename
         
         # initalize other data to add
-        self.graph = None
+        self.graph = graph
         self.isomorph_group = None
         self.cluster = None
+        self.k2chi = None  # will be set later when calculating chi(k)
+
+        if isinstance(graph, nx.Graph) or isinstance(graph, nx.DiGraph):
+            self.atoms = [a for n,a in graph.nodes(data=True)]  # extract atoms from the graph
 
 
     def __repr__(self):
-        return f'ScatteringPath(frame={self.frame}, path={self.path})'
+        return f'ScatteringPath from {self.filename}'
 
 
-    @property
-    def cluster_key(self):
-        '''Unique key for the cluster parameters'''
-        return (self.isomorph_group, self.cluster)
+    def __str__(self):
+        return self.__repr__()
+
+
+    def show(self):
+        '''
+        Show the path graph using NetworkX's drawing capabilities.
+        '''
+        plot_path_graph(self.graph)
+
+
+    # @property
+    # def cluster_key(self):
+    #     '''Unique key for the cluster parameters'''
+    #     return (self.isomorph_group, self.cluster)
 
 
 def read_files(filename):
@@ -1010,3 +1337,31 @@ def k2chi_to_chiR(k, k2chi, kmin=2.5, kmax=8, dk=1):
     chiR = grp.chir_mag
     
     return R, chiR
+
+
+def find_chiR_peak(r, chiR):
+    '''
+    Find the peak in chi(R) and return the position and value of the peak.
+    This function assumes that the peak is the maximum value in chi(R) and returns the corresponding r value.
+
+    Parameters
+    ----------
+    r : np.ndarray
+        Real space distances corresponding to chi(R).
+    chiR : np.ndarray
+        chi(R) values corresponding to the r distances.
+
+    Returns
+    -------
+    peak_r : float
+        The r value at which the peak of chi(R) occurs.
+    peak_chiR : float
+        The value of chi(R) at the peak position.
+
+    '''
+
+    peak_idx = np.argmax(chiR)  # find the index of the maximum value in chi(R)
+    peak_r = r[peak_idx]  # get the corresponding r value
+    peak_chiR = chiR[peak_idx]  # get the value of chi(R) at the peak position
+    
+    return peak_r, peak_chiR

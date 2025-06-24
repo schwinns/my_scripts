@@ -405,7 +405,9 @@ class Averager:
         Calculate the average k^2*chi(k) from multiple FEFF path files.
     remove_hydrogen_paths()
         Remove paths that contain hydrogen atoms from the list of paths and update the files DataFrame.
-
+    update_paths(files=None)
+        Update the paths based on the files.dat information. Either you can directly edit the `files` attribute then run this method,
+        or you can pass a DataFrame with the same columns as the `files` attribute.
 
     '''
 
@@ -452,27 +454,34 @@ class Averager:
         # read in all frame information
         dfs = []
         self.paths = []  # list of ScatteringPath objects
+        self.n_frames = 0  # number of frames
         for frame in frames:
             frame_path = os.path.join(frame_dir, f'frame{frame:04d}')
             if not os.path.isdir(frame_path):
                 raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
 
-            df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
-            df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
-            df['frame'] = frame  # add a frame column for reference
-            df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
-            dfs.append(df)
+            try:
+                df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
+                df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
+                df['frame'] = frame  # add a frame column for reference
+                df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
 
-            self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
-            file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
-            for g in self._graphs:
-                file = file_map.get(g.graph["path_index"])
-                if file:
-                    self.paths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
+                self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
+                file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
+                for g in self._graphs:
+                    file = file_map.get(g.graph["path_index"])
+                    if file:
+                        self.paths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
+
+                dfs.append(df)
+                self.n_frames += 1  # increment the number of frames
+
+            except:
+                print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
+                pass
 
         self.files = pd.concat(dfs, ignore_index=True) # save files.dat from all frames in a single DataFrame
         self.files['paths'] = self.paths
-        self.n_frames = len(frames)
 
         if not include_hydrogen:
             self.remove_hydrogen_paths()

@@ -468,17 +468,23 @@ class Averager:
 
                 self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
                 file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
+                mypaths = []
                 for g in self._graphs:
                     file = file_map.get(g.graph["path_index"])
                     if file:
-                        self.paths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
-
-                dfs.append(df)
-                self.n_frames += 1  # increment the number of frames
+                        mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
 
             except:
                 print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
-                pass
+                continue
+
+            if df.shape[0] != len(mypaths):
+                print(f"Warning: Number of paths ({len(mypaths)}) does not match number of files ({df.shape[0]}) in {frame_path}. Skipping this frame.")
+                continue
+
+            dfs.append(df)
+            self.paths.extend(mypaths)  # extend the paths list with the new paths
+            self.n_frames += 1  # increment the number of frames
 
         self.files = pd.concat(dfs, ignore_index=True) # save files.dat from all frames in a single DataFrame
         self.files['paths'] = self.paths
@@ -500,7 +506,7 @@ class Averager:
         return len(self.paths)
     
 
-    def average(self, k, paths=None, njobs=None):
+    def average(self, k, paths=None, njobs=None, chunk_size=None):
         '''
         Calculate the average k^2*chi(k) from multiple FEFF path files.
 
@@ -513,6 +519,8 @@ class Averager:
         njobs : int, optional
             Number of parallel jobs to run. Default is None, which uses the `njobs` attribute. If this is specified, it overrides
             the class attribute.
+        chunk_size : int, optional
+            Number of paths to process in each chunk for better load balancing. Default is None, which uses adaptive sizing.
         
         Returns
         -------
@@ -526,22 +534,24 @@ class Averager:
 
         if njobs is not None:
             self.njobs = njobs
+        
+        if chunk_size is None:
+            # Adaptive chunk size: balance between overhead and load balancing
+            chunk_size = max(1, len(paths) // (self.njobs * 4))
 
         run_per_path = partial(self._feff_per_path, paths=paths, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
 
-        if self.progress_bar:
-            with Pool(self.njobs) as worker_pool:
-                result = []
-                for r in tqdm(worker_pool.imap_unordered(run_per_path, np.arange(len(paths))), total=len(paths), desc='Processing paths'):
-                    result.append(r)
+        # Use imap with chunksize for better load balancing and memory efficiency
+        with Pool(self.njobs) as worker_pool:
+            if self.progress_bar:
+                results = list(tqdm(worker_pool.imap(run_per_path, range(len(paths)), chunksize=chunk_size),
+                                   total=len(paths), desc='Processing paths'))
+            else:
+                results = worker_pool.map(run_per_path, range(len(paths)), chunksize=chunk_size)
 
-        else:
-            with Pool(self.njobs) as worker_pool:
-                result = worker_pool.map(run_per_path, np.arange(len(paths)))
-
-        result = np.asarray(result) 
-        
-        return result.sum(axis=0) / self.n_frames
+        # Convert to numpy array and sum in one operation
+        result_array = np.array(results)
+        return result_array.sum(axis=0) / self.n_frames
     
 
     def remove_hydrogen_paths(self):
@@ -552,14 +562,27 @@ class Averager:
         and also removes corresponding entries from the `files` DataFrame attribute.
         '''
         
+        if self.progress_bar:
+            print('Removing paths with hydrogen atoms...')
+        
+        # Create lists
+        filtered_paths = []
         to_remove = []
-        for p in self.paths:
-            for atom in p.atoms:
-                if atom['label'] == 'H':
-                    to_remove.append(p.filename)
-                    self.paths.remove(p)
-                    break
-
+        
+        # Use tqdm for progress bar if enabled
+        iterator = tqdm(self.paths) if self.progress_bar else self.paths
+        
+        for p in iterator:
+            # Use any() with generator expression for early exit
+            has_hydrogen = any(atom['label'] == 'H' for atom in p.atoms)
+            if has_hydrogen:
+                to_remove.append(p.filename)
+            else:
+                filtered_paths.append(p)
+        
+        # Replace the paths list
+        self.paths = filtered_paths
+        
         # Remove rows from self.files where 'file' is in to_remove
         if to_remove:
             self.files = self.files[~self.files['file'].isin(to_remove)].reset_index(drop=True)

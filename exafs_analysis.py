@@ -612,7 +612,39 @@ class Averager:
             self.files = files  # directly set the files attribute if a DataFrame is passed
 
         self.paths = self.files['paths'].to_list()  # update paths based on the files DataFrame
-    
+
+
+    def get_isomorph_groups(self):
+        '''
+        Get isomorph groups of the paths based on their graphs. This method uses NetworkX's isomorphism to find groups of paths that are isomorphic.
+        Implements an atom matcher so that it checks for isomorphism based on the elements, not just the graph structure.
+
+        '''
+        
+        # Create a node matcher that matches nodes based on their 'label' attribute, aka atom identity
+        atom_matcher = iso.categorical_node_match('label', 'unknown')
+        self.isomorph_groups = []
+        isomorph_indices = []  # to keep track of indices of isomorph groups
+
+        for path in self.paths:
+            g = path.graph  # get the graph from the ScatteringPath object
+            found_group = False
+            for idx,group in enumerate(self.isomorph_groups):
+                # Compare with the first graph in the group (representative)
+                if iso.is_isomorphic(g, group[0].graph, node_match=atom_matcher):
+                    group.append(path)
+                    path.isomorph_group = idx  # assign the isomorph group index
+                    isomorph_indices.append(idx)
+                    found_group = True
+                    break
+            if not found_group:
+                self.isomorph_groups.append([path])
+                path.isomorph_group = len(self.isomorph_groups) - 1  # assign the new group index
+                isomorph_indices.append(len(self.isomorph_groups) - 1)
+
+        # add to the files DataFrame
+        self.files['isomorph_group'] = isomorph_indices
+
 
     def _graphs_from_paths_dat(self, filename):
         graphs = []
@@ -713,10 +745,26 @@ class Averager:
         '''
         
         path = paths[idx]
-        p = xafs.feffpath(path.filename, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
-        xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
-        k2chi = p.chi * p.k**2  # k^2 * chi(k)
-        path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
+        file_path = os.path.dirname(path.filename)
+
+        # read in the text file if it has already been calculated
+        if not os.path.exists(file_path+'chi.dat'):
+
+            p = xafs.feffpath(path.filename, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
+            xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
+            k2chi = p.chi * p.k**2  # k^2 * chi(k)
+            path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
+            
+            # Save the results to a file
+            header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
+            np.savetxt(f'{file_path}chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
+
+        else:
+
+            data = np.loadtxt(file_path+'chi.dat', comments='#')
+            k2chi = data[:, 2]
+
+
         return k2chi
 
 

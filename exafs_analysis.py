@@ -626,7 +626,8 @@ class Averager:
         self.isomorph_groups = []
         isomorph_indices = []  # to keep track of indices of isomorph groups
 
-        for path in self.paths:
+        iterator = tqdm(self.paths) if self.progress_bar else self.paths
+        for path in iterator:
             g = path.graph  # get the graph from the ScatteringPath object
             found_group = False
             for idx,group in enumerate(self.isomorph_groups):
@@ -745,10 +746,10 @@ class Averager:
         '''
         
         path = paths[idx]
-        file_path = os.path.dirname(path.filename)
+        file_pattern = path.filename.split('.dat')[0]
 
         # read in the text file if it has already been calculated
-        if not os.path.exists(file_path+'chi.dat'):
+        if not os.path.exists(file_pattern+'_chi.dat'):
 
             p = xafs.feffpath(path.filename, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
             xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
@@ -757,11 +758,11 @@ class Averager:
             
             # Save the results to a file
             header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
-            np.savetxt(f'{file_path}chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
+            np.savetxt(f'{file_pattern}_chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
 
         else:
 
-            data = np.loadtxt(file_path+'chi.dat', comments='#')
+            data = np.loadtxt(file_pattern+'_chi.dat', comments='#')
             k2chi = data[:, 2]
 
 

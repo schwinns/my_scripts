@@ -1,5 +1,6 @@
 # Class to extract clusters from MD simulations and calculate EXAFS spectra with FEFF, optimize with experimental data
 
+import copy
 from glob import glob
 import matplotlib.pyplot as plt
 import numpy as np
@@ -499,7 +500,15 @@ class Averager:
 
     def __str__(self):
         return self.__repr__()
-    
+
+
+    def copy(self):
+        '''
+        Create a copy of the current Averager instance.
+        This method creates a deep copy of the Averager instance, including all attributes and paths.
+        '''
+        return copy.deepcopy(self)
+
 
     @property
     def n_paths(self):
@@ -550,8 +559,8 @@ class Averager:
                 results = worker_pool.map(run_per_path, range(len(paths)), chunksize=chunk_size)
 
         # Convert to numpy array and sum in one operation
-        result_array = np.array(results)
-        return result_array.sum(axis=0) / self.n_frames
+        self._result_array = np.array(results)
+        return self._result_array.sum(axis=0) / self.n_frames
     
 
     def remove_hydrogen_paths(self):
@@ -747,9 +756,19 @@ class Averager:
         
         path = paths[idx]
         file_pattern = path.filename.split('.dat')[0]
+        perform_calc = True  # flag to determine if we need to perform the calculation
 
         # read in the text file if it has already been calculated
-        if not os.path.exists(file_pattern+'_chi.dat'):
+        if os.path.exists(file_pattern+'_chi.dat'):
+
+            data = np.loadtxt(file_pattern+'_chi.dat', comments='#')
+
+            if data[:,0].shape == k.shape: # check if the k values match
+                perform_calc = False
+                k2chi = data[:, 2]
+                path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
+
+        if perform_calc:
 
             p = xafs.feffpath(path.filename, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
             xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
@@ -759,11 +778,6 @@ class Averager:
             # Save the results to a file
             header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
             np.savetxt(f'{file_pattern}_chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
-
-        else:
-
-            data = np.loadtxt(file_pattern+'_chi.dat', comments='#')
-            k2chi = data[:, 2]
 
 
         return k2chi

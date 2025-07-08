@@ -1,39 +1,49 @@
 # Class to extract clusters from MD simulations and calculate EXAFS spectra with FEFF, optimize with experimental data
 
+# standard
 import copy
-from glob import glob
 import matplotlib.pyplot as plt
 import numpy as np
-import os
 import pandas as pd
+from time import perf_counter as time
+from tqdm import tqdm
+
+# file handling
+from glob import glob
+import os
 import pickle
 import re
+import tarfile
 from textwrap import dedent
-from time import perf_counter as time
+import tempfile
 import subprocess
+import shutil
 
+# NetworkX
 import networkx as nx
 from networkx.algorithms import isomorphism as iso
 
+# clustering
 from sklearn.cluster import HDBSCAN
 from sklearn.preprocessing import StandardScaler
 
+# MD data
 from ase.data import atomic_numbers
 from MDAnalysis.analysis.base import Results
-
-from larch import xafs
-from larch import Group
 from ParallelMDAnalysis import ParallelAnalysisBase
 
-# from skopt import gp_minimize
+# Larch
+from larch import xafs
+from larch import Group
+
+# plotting preferences
 from matplotlib.ticker import MultipleLocator
 plt.rcParams['font.size'] = 16
 
+# parallel processing
 import multiprocessing
 from multiprocessing import Pool
 from functools import partial
-
-from tqdm import tqdm
 
 import warnings
 warnings.simplefilter("ignore", SyntaxWarning)
@@ -53,6 +63,149 @@ def run(commands : list | str):
 def load_object(filename):
     with open(filename, 'rb') as f:
         return pickle.load(f)
+
+
+def extract_from_tar(func): # decorator to extract files from tar archives
+    def wrapper(filename, *args, **kwargs):
+        # Check if this is a tar path like: archive.tar.gz/path/inside.tar
+        parts = filename.split(os.sep)
+        for i, part in enumerate(parts):
+            if part.endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2')):
+                archive_path = os.sep.join(parts[:i + 1])
+                inner_path = os.sep.join(parts[i + 1:])
+                break
+        else:
+            # Not a tar path; call the original function
+            return func(filename, *args, **kwargs)
+
+        # Extract inner file from the tar archive
+        with tarfile.open(archive_path, 'r:*') as tar:
+            try:
+                member = tar.getmember(inner_path)
+                f = tar.extractfile(member)
+                if f is None:
+                    raise FileNotFoundError(f"Could not extract '{inner_path}' from '{archive_path}'")
+                return func(f, *args, **kwargs)
+            except KeyError:
+                raise FileNotFoundError(f"'{inner_path}' not found in '{archive_path}'")
+    return wrapper
+
+
+
+def create_tar_archive_with_compression(file_list, output_filename, compression='gz'):
+    """
+    Create TAR archive with different compression options
+    
+    Args:
+        file_list: List of files to compress
+        output_filename: Output filename
+        compression: 'gz', 'bz2', 'xz', or None for no compression
+    """
+    if compression:
+        mode = f'w:{compression}'
+    else:
+        mode = 'w'
+    
+    with tarfile.open(output_filename, mode) as tar:
+        for file_path in file_list:
+            if os.path.exists(file_path):
+                tar.add(file_path, arcname=os.path.basename(file_path))
+                # print(f"Added {file_path}")
+
+
+def compress_directory(source_dir, output_filename, compression='gz'):
+    """
+    Compress an entire directory into a tar archive
+    
+    Args:
+        source_dir (str): Path to the directory to compress
+        output_filename (str): Output filename for the archive
+        compression (str): Compression method - 'gz', 'bz2', 'xz', or None for no compression
+    
+    Returns:
+        bool: True if successful, False otherwise
+    
+    Example:
+        compress_directory('/path/to/my_folder', 'my_folder.tar.gz')
+        compress_directory('/path/to/my_folder', 'my_folder.tar.bz2', compression='bz2')
+    """
+    if not os.path.exists(source_dir):
+        print(f"Error: Source directory '{source_dir}' does not exist.")
+        return False
+    
+    if not os.path.isdir(source_dir):
+        print(f"Error: '{source_dir}' is not a directory.")
+        return False
+    
+    # Set compression mode
+    if compression:
+        mode = f'w:{compression}'
+        if not output_filename.endswith(f'.tar.{compression}'):
+            print(f"Warning: Output filename should end with '.tar.{compression}' for {compression} compression")
+    else:
+        mode = 'w'
+        if not output_filename.endswith('.tar'):
+            print(f"Warning: Output filename should end with '.tar' for uncompressed archives")
+    
+    try:
+        with tarfile.open(output_filename, mode) as tar:
+            tar.add(source_dir, arcname=os.path.basename(source_dir))
+        
+        print(f"Successfully created archive: {output_filename}")
+        return True
+        
+    except Exception as e:
+        print(f"Error creating archive: {e}")
+        return False
+
+
+def get_user_confirmation(files_to_remove, always_confirm=False):
+    """
+    Ask for user confirmation
+    
+    Args:
+        files_to_remove: List of files that will compressed then removed
+        always_confirm: If True, always allow, never ask for confirmation
+    
+    Returns:
+        bool: True if user confirms, False otherwise
+    """
+    if not files_to_remove:
+        print("No files will be excluded from compression.")
+        return True
+
+    print('The following files will be compressed and then removed:')
+    for file in files_to_remove:
+        print(file)
+    
+    print(f"\nTotal files to compress: {len(files_to_remove)}")
+    
+    if always_confirm:
+        return True
+
+    while True:
+        response = input("\nDo you want to proceed with compressing and deleting these files? (y/n): ").lower().strip()
+        if response in ['y', 'yes']:
+            return True
+        elif response in ['n', 'no']:
+            return False
+        else:
+            print("Please enter 'y' for yes, 'n' for no")
+
+
+def remove_files(file_list):
+    """
+    Remove files from the filesystem
+    
+    Args:
+        file_list: List of files to remove
+    """
+    for file_path in file_list:
+        try:
+            os.remove(file_path)
+            # print(f"Removed {file_path}")
+        except OSError as e:
+            print(f"Error removing {file_path}: {e}")
 
 
 def k2chi_axis(ion='Unspecified', xmin=1, xmax=6, ymin=-0.6, ymax=0.6, 
@@ -236,7 +389,7 @@ def write_feff(potentials, atoms, title='FEFF8.5 input',  edge='K', s02=1.0, kma
 
     return filename
 
-
+@extract_from_tar
 def load_feff(chi_file):
     data = np.loadtxt(chi_file, comments='#')
     feff = pd.DataFrame(data, columns=['k', 'chi', 'mag', 'phase'])
@@ -298,6 +451,13 @@ class EXAFS(ParallelAnalysisBase):
         if os.path.exists(f'{self.dir}frame{frame_idx:04d}/chi.dat'):
             df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')
 
+            if not os.path.exists(f'{self.dir}frame{frame_idx:04d}.tar.gz'):
+                # clean up the files to save disk space
+                compressed_file = f'{self.dir}frame{frame_idx:04d}.tar.gz'
+                directory_to_compress = f'{self.dir}frame{frame_idx:04d}/'
+                compress_directory(directory_to_compress, compressed_file, compression='gz')
+                shutil.rmtree(directory_to_compress)  # remove the directory after compression
+
             frame_end = time()
 
             print(f'{self.dir}frame{frame_idx:04d}/ already performed, skipping...')
@@ -334,10 +494,16 @@ class EXAFS(ParallelAnalysisBase):
         inp = write_feff(potential_lines, atom_lines, filename=f'{self.dir}frame{frame_idx:04d}/feff.inp',
                          **self.feff_settings)
         feff = xafs.feff8l(folder=f'{self.dir}frame{frame_idx:04d}', feffinp=inp)
-        # feff.run() # I think this is repetitive
 
         # report results and time for this frame
         df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')
+
+        # clean up the files to save disk space
+        compressed_file = f'{self.dir}frame{frame_idx:04d}.tar.gz'
+        directory_to_compress = f'{self.dir}frame{frame_idx:04d}/'
+        compress_directory(directory_to_compress, compressed_file, compression='gz')
+        shutil.rmtree(directory_to_compress)  # remove the directory after compression
+
         frame_end = time()
 
         # return the results for this frame
@@ -353,7 +519,7 @@ class EXAFS(ParallelAnalysisBase):
         for res in self._result:
             df, idx, t = res
             self.results._per_frame[idx] = df
-            self.results.k2chi += res['k2chi'].values
+            self.results.k2chi += df['k2chi'].values
             self.frame_times[idx] = t
 
         self.results.k2chi /= len(self._result)
@@ -656,6 +822,7 @@ class Averager:
         self.files['isomorph_group'] = isomorph_indices
 
 
+    @extract_from_tar
     def _graphs_from_paths_dat(self, filename):
         graphs = []
         with open(filename) as f:
@@ -691,6 +858,7 @@ class Averager:
         return graphs
 
 
+    @extract_from_tar
     def _read_files_dat(self, filename):
         '''
         Read files.dat file and return a DataFrame
@@ -776,8 +944,31 @@ class Averager:
             path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
             
             # Save the results to a file
-            header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
-            np.savetxt(f'{file_pattern}_chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
+            # check if the file pattern contains a tar archive
+            parts = file_pattern.split(os.sep)
+            for i, part in enumerate(parts):
+                if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
+                    archive_path = os.sep.join(parts[:i + 1])
+                    internal_path = os.sep.join(parts[i + 1:])
+                    is_tar = True
+                    break
+
+            if is_tar:
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    temp_path = tmp.name
+
+                header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
+                np.savetxt(temp_path, np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
+
+                # Add to tar archive
+                mode = 'a' if os.path.exists(archive_path) else 'w:gz'
+                with tarfile.open(archive_path, mode) as tar:
+                    tar.add(temp_path, arcname=internal_path)
+
+            else: # just save to a regular file
+                header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
+                np.savetxt(f'{file_pattern}_chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
 
 
         return k2chi
@@ -1158,7 +1349,7 @@ def build_graph_from_atoms(G, atoms):
     
     return G
 
-
+@extract_from_tar
 def parse_paths(filename):
     graphs = []
     with open(filename) as f:
@@ -1223,8 +1414,8 @@ def get_paths_and_clusters(path_files):
     paths : list of ScatteringPath objects
         List of ScatteringPath objects, each representing a scattering path with its associated graph.
     cluster_map : dict
-        Dictionary mapping each unique cluster key to a unique index. The keys are tuples of (isomorph_group, cluster).
-
+        Dictionary mapping each cluster to a parameter index. This is used to determine which parameters
+        to apply to each path.
     '''
 
     # read in paths and create graphs for each scattering path
@@ -1359,7 +1550,7 @@ class ScatteringPath:
     #     '''Unique key for the cluster parameters'''
     #     return (self.isomorph_group, self.cluster)
 
-
+@extract_from_tar
 def read_files(filename):
     '''
     Read files.dat file and return a DataFrame

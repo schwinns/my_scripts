@@ -655,8 +655,8 @@ class Averager:
         self.n_frames = 0  # number of frames
         for fd in frame_dir:
             for frame in frames:
-                frame_path = os.path.join(fd, f'frame{frame:04d}')
-                if not os.path.isdir(frame_path):
+                frame_path = os.path.join(fd, f'frame{frame:04d}.tar.gz')
+                if not os.path.exists(frame_path):
                     raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
 
                 try:
@@ -897,8 +897,8 @@ class Averager:
         
         Parameters
         ----------
-        filename : str
-            Path to the files.dat file.
+        filename : str or file-like object
+            Path to the files.dat file or file-like object from tar archive.
 
         Returns
         -------
@@ -908,20 +908,48 @@ class Averager:
         
         '''
 
-        # Find the line after the separator (-------)
-        with open(filename) as f:
-            for i, line in enumerate(f):
-                if set(line.strip()) == {"-"}:
-                    header_line = i + 1
-                    break
+        # Handle both file paths and file-like objects
+        if hasattr(filename, 'read'):
+            # It's a file-like object (from tar)
+            content = filename.read()
+            if isinstance(content, bytes):
+                content = content.decode('utf-8')
+            lines = content.splitlines()
+        else:
+            # It's a file path
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+                lines = [line.rstrip('\n\r') for line in lines]  # Remove newlines for consistency
 
-        # Read the table
-        df = pd.read_csv(
-            filename,
-            delim_whitespace=True,
-            skiprows=header_line + 1,
-            names=["file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective"]
-        )
+        # Find the line after the separator (-------)
+        header_line = None
+        for i, line in enumerate(lines):
+            if set(line.strip()) == {"-"}:
+                header_line = i + 1
+                break
+        
+        if header_line is None:
+            raise ValueError("Could not find dash line separator in the file")
+
+        # Extract data lines (skip header line and column names)
+        data_lines = lines[header_line + 1:]
+        
+        # Parse the data manually
+        data = []
+        for line in data_lines:
+            line = line.strip()
+            if line:  # Skip empty lines
+                parts = line.split()
+                if len(parts) >= 6:  # Ensure we have all required columns
+                    data.append(parts[:6])
+        
+        # Create DataFrame
+        df = pd.DataFrame(data, columns=["file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective"])
+        
+        # Convert numeric columns to appropriate types
+        numeric_columns = ["sig2", "amp_ratio", "deg", "nlegs", "r_effective"]
+        for col in numeric_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
         return df
 
@@ -1591,8 +1619,8 @@ def read_files(filename):
     
     Parameters
     ----------
-    filename : str
-        Path to the files.dat file.
+    filename : str or file-like object
+        Path to the files.dat file or file-like object from tar archive.
 
     Returns
     -------
@@ -1602,20 +1630,48 @@ def read_files(filename):
     
     '''
 
-    # Find the line after the separator (-------)
-    with open(filename) as f:
-        for i, line in enumerate(f):
-            if set(line.strip()) == {"-"}:
-                header_line = i + 1
-                break
+    # Handle both file paths and file-like objects
+    if hasattr(filename, 'read'):
+        # It's a file-like object (from tar)
+        content = filename.read()
+        if isinstance(content, bytes):
+            content = content.decode('utf-8')
+        lines = content.splitlines()
+    else:
+        # It's a file path
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+            lines = [line.rstrip('\n\r') for line in lines]  # Remove newlines for consistency
 
-    # Read the table
-    df = pd.read_csv(
-        filename,
-        delim_whitespace=True,
-        skiprows=header_line + 1,
-        names=["file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective"]
-    )
+    # Find the line after the separator (-------)
+    header_line = None
+    for i, line in enumerate(lines):
+        if set(line.strip()) == {"-"}:
+            header_line = i + 1
+            break
+    
+    if header_line is None:
+        raise ValueError("Could not find dash line separator in the file")
+
+    # Extract data lines (skip header line and column names)
+    data_lines = lines[header_line + 1:]
+    
+    # Parse the data manually
+    data = []
+    for line in data_lines:
+        line = line.strip()
+        if line:  # Skip empty lines
+            parts = line.split()
+            if len(parts) >= 6:  # Ensure we have all required columns
+                data.append(parts[:6])
+    
+    # Create DataFrame
+    df = pd.DataFrame(data, columns=["file", "sig2", "amp_ratio", "deg", "nlegs", "r_effective"])
+    
+    # Convert numeric columns to appropriate types
+    numeric_columns = ["sig2", "amp_ratio", "deg", "nlegs", "r_effective"]
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
 
     return df
 

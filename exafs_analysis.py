@@ -68,13 +68,16 @@ def load_object(filename):
 def extract_from_tar(func): # decorator to extract files from tar archives
     def wrapper(filename, *args, **kwargs):
         # Check if this is a tar path like: archive.tar.gz/path/inside.tar
+        is_tar = False
         parts = filename.split(os.sep)
         for i, part in enumerate(parts):
             if part.endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2')):
                 archive_path = os.sep.join(parts[:i + 1])
                 inner_path = os.sep.join(parts[i + 1:])
+                is_tar = True
                 break
-        else:
+
+        if not is_tar:
             # Not a tar path; call the original function
             return func(filename, *args, **kwargs)
 
@@ -90,6 +93,34 @@ def extract_from_tar(func): # decorator to extract files from tar archives
                 raise FileNotFoundError(f"'{inner_path}' not found in '{archive_path}'")
     return wrapper
 
+
+def extract_from_tar_class(func): # decorator to extract files from tar archives
+    def wrapper(self, filename, *args, **kwargs):
+        # Check if this is a tar path like: archive.tar.gz/path/inside.tar
+        is_tar = False
+        parts = filename.split(os.sep)
+        for i, part in enumerate(parts):
+            if part.endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2')):
+                archive_path = os.sep.join(parts[:i + 1])
+                inner_path = os.sep.join(parts[i + 1:])
+                is_tar = True
+                break
+
+        if not is_tar:
+            # Not a tar path; call the original function
+            return func(self, filename, *args, **kwargs)
+
+        # Extract inner file from the tar archive
+        with tarfile.open(archive_path, 'r:*') as tar:
+            try:
+                member = tar.getmember(inner_path)
+                f = tar.extractfile(member)
+                if f is None:
+                    raise FileNotFoundError(f"Could not extract '{inner_path}' from '{archive_path}'")
+                return func(self, f, *args, **kwargs)
+            except KeyError:
+                raise FileNotFoundError(f"'{inner_path}' not found in '{archive_path}'")
+    return wrapper
 
 
 def create_tar_archive_with_compression(file_list, output_filename, compression='gz'):
@@ -448,16 +479,9 @@ class EXAFS(ParallelAnalysisBase):
         frame_start = time()
 
         # if the calculation has already been run, skip
-        if os.path.exists(f'{self.dir}frame{frame_idx:04d}/chi.dat'):
-            df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')
-
-            if not os.path.exists(f'{self.dir}frame{frame_idx:04d}.tar.gz'):
-                # clean up the files to save disk space
-                compressed_file = f'{self.dir}frame{frame_idx:04d}.tar.gz'
-                directory_to_compress = f'{self.dir}frame{frame_idx:04d}/'
-                compress_directory(directory_to_compress, compressed_file, compression='gz')
-                shutil.rmtree(directory_to_compress)  # remove the directory after compression
-
+        if os.path.exists(f'{self.dir}frame{frame_idx:04d}.tar.gz'):
+            
+            df = load_feff(f'{self.dir}frame{frame_idx:04d}.tar.gz/chi.dat')
             frame_end = time()
 
             print(f'{self.dir}frame{frame_idx:04d}/ already performed, skipping...')
@@ -501,8 +525,8 @@ class EXAFS(ParallelAnalysisBase):
         # clean up the files to save disk space
         compressed_file = f'{self.dir}frame{frame_idx:04d}.tar.gz'
         directory_to_compress = f'{self.dir}frame{frame_idx:04d}/'
-        compress_directory(directory_to_compress, compressed_file, compression='gz')
-        shutil.rmtree(directory_to_compress)  # remove the directory after compression
+        if compress_directory(directory_to_compress, compressed_file, compression='gz'):
+            shutil.rmtree(directory_to_compress)  # remove the directory after compression
 
         frame_end = time()
 
@@ -512,7 +536,7 @@ class EXAFS(ParallelAnalysisBase):
     
     def _conclude(self):
         
-        self.results.k = load_feff(f'{self.dir}frame{0:04d}/chi.dat')['k'].values
+        self.results.k = load_feff(f'{self.dir}frame{0:04d}.tar.gz/chi.dat')['k'].values
         self.results.k2chi = np.zeros(self.results.k.shape)
         
         # extract results from all processors and average k2chi
@@ -587,6 +611,9 @@ class Averager:
         ----------
         frames : np.ndarray
             Array of frame indices to be averaged.
+        frame_dir : str, list
+            One or more directories containing the frame directories with FEFF path files. 
+            Each frame should have a subdirectory named 'frameXXXX' where XXXX is the frame index.
         deltar : float, optional
             DeltaR parameter for the FEFF calculation. Default is 0.0.
         e0 : float, optional
@@ -615,43 +642,48 @@ class Averager:
         else:
             self.njobs = njobs
 
-        if not os.path.isdir(frame_dir):
-            raise FileNotFoundError(f"Directory {frame_dir} does not exist.")
+        if not isinstance(frame_dir, list):
+            frame_dir = [frame_dir]  # ensure frame_dir is a list
+
+        for fd in frame_dir:
+            if not os.path.isdir(fd):
+                raise FileNotFoundError(f"Directory {fd} does not exist.")
 
         # read in all frame information
         dfs = []
         self.paths = []  # list of ScatteringPath objects
         self.n_frames = 0  # number of frames
-        for frame in frames:
-            frame_path = os.path.join(frame_dir, f'frame{frame:04d}')
-            if not os.path.isdir(frame_path):
-                raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
+        for fd in frame_dir:
+            for frame in frames:
+                frame_path = os.path.join(fd, f'frame{frame:04d}')
+                if not os.path.isdir(frame_path):
+                    raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
 
-            try:
-                df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
-                df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
-                df['frame'] = frame  # add a frame column for reference
-                df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
+                try:
+                    df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
+                    df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
+                    df['frame'] = frame  # add a frame column for reference
+                    df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
 
-                self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
-                file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
-                mypaths = []
-                for g in self._graphs:
-                    file = file_map.get(g.graph["path_index"])
-                    if file:
-                        mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
+                    self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
+                    file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
+                    mypaths = []
+                    for g in self._graphs:
+                        file = file_map.get(g.graph["path_index"])
+                        if file:
+                            mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
 
-            except:
-                print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
-                continue
+                except:
+                    print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
+                    continue
 
-            if df.shape[0] != len(mypaths):
-                print(f"Warning: Number of paths ({len(mypaths)}) does not match number of files ({df.shape[0]}) in {frame_path}. Skipping this frame.")
-                continue
+                if df.shape[0] != len(mypaths):
+                    print(f"Warning: Number of paths ({len(mypaths)}) does not match number of files ({df.shape[0]}) in {frame_path}. Skipping this frame.")
+                    continue
 
-            dfs.append(df)
-            self.paths.extend(mypaths)  # extend the paths list with the new paths
-            self.n_frames += 1  # increment the number of frames
+                dfs.append(df)
+                self.paths.extend(mypaths)  # extend the paths list with the new paths
+                self.n_frames += 1  # increment the number of frames
 
         self.files = pd.concat(dfs, ignore_index=True) # save files.dat from all frames in a single DataFrame
         self.files['paths'] = self.paths
@@ -822,7 +854,7 @@ class Averager:
         self.files['isomorph_group'] = isomorph_indices
 
 
-    @extract_from_tar
+    @extract_from_tar_class
     def _graphs_from_paths_dat(self, filename):
         graphs = []
         with open(filename) as f:
@@ -858,7 +890,7 @@ class Averager:
         return graphs
 
 
-    @extract_from_tar
+    @extract_from_tar_class
     def _read_files_dat(self, filename):
         '''
         Read files.dat file and return a DataFrame
@@ -937,6 +969,8 @@ class Averager:
                 path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
 
         if perform_calc:
+
+            is_tar = False
 
             p = xafs.feffpath(path.filename, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
             xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data

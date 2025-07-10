@@ -90,7 +90,16 @@ def extract_from_tar(func): # decorator to extract files from tar archives
                     raise FileNotFoundError(f"Could not extract '{inner_path}' from '{archive_path}'")
                 return func(f, *args, **kwargs)
             except KeyError:
-                raise FileNotFoundError(f"'{inner_path}' not found in '{archive_path}'")
+                # Fallback: try using just the filename
+                filepath = os.path.basename(inner_path)
+                try:
+                    member = tar.getmember(filepath)
+                    f = tar.extractfile(member)
+                    if f is None:
+                        raise FileNotFoundError(f"Could not extract '{filepath}' from '{archive_path}'")
+                    return func(f, *args, **kwargs)
+                except KeyError:
+                    raise FileNotFoundError(f"Neither '{inner_path}' nor '{filepath}' found in '{archive_path}'")
     return wrapper
 
 
@@ -119,7 +128,18 @@ def extract_from_tar_class(func): # decorator to extract files from tar archives
                     raise FileNotFoundError(f"Could not extract '{inner_path}' from '{archive_path}'")
                 return func(self, f, *args, **kwargs)
             except KeyError:
-                raise FileNotFoundError(f"'{inner_path}' not found in '{archive_path}'")
+                # Fallback for the cluster
+                filepath = archive_path.split(os.sep)[:-1]
+                filepath = os.path.join(*filepath, inner_path)
+                print(filepath)
+                try:
+                    member = tar.getmember(filepath)
+                    f = tar.extractfile(member)
+                    if f is None:
+                        raise FileNotFoundError(f"Could not extract '{filepath}' from '{archive_path}'")
+                    return func(self, f, *args, **kwargs)
+                except KeyError:
+                    raise FileNotFoundError(f"Neither '{inner_path}' nor '{filepath}' found in '{archive_path}'")
     return wrapper
 
 

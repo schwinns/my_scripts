@@ -1629,6 +1629,15 @@ class PolymAnalysis():
                 water_kwargs['cut'] = 0
 
             coords = pd.DataFrame(water.positions, columns=['x', 'y', 'z'])
+            wrapped_z_below = coords['z'] - (self.box[1,2] - self.box[0,2])
+            wrapped_z_above = coords['z'] + (self.box[1,2] - self.box[0,2])
+            wrapped_coords_below = coords.copy()
+            wrapped_coords_below['z'] = wrapped_z_below
+            wrapped_coords_above = coords.copy()
+            wrapped_coords_above['z'] = wrapped_z_above
+
+            coords = pd.concat([coords, wrapped_coords_below, wrapped_coords_above], ignore_index=True)
+    
             # plot the water with a kernel density estimate
             sns.kdeplot(coords, x='z', y=ydim, cmap='Blues', ax=ax, **water_kwargs)
             

@@ -86,17 +86,15 @@ def extract_from_tar(func): # decorator to extract files from tar archives
             try:
                 member = tar.getmember(inner_path)
                 f = tar.extractfile(member)
-                if f is None:
-                    raise FileNotFoundError(f"Could not extract '{inner_path}' from '{archive_path}'")
                 return func(f, *args, **kwargs)
+            
             except KeyError:
-                # Fallback: try using just the filename
-                filepath = os.path.basename(inner_path)
+                # Fallback for the cluster
+                frame = [part for part in filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
+                filepath = os.path.join(frame, inner_path)
                 try:
                     member = tar.getmember(filepath)
                     f = tar.extractfile(member)
-                    if f is None:
-                        raise FileNotFoundError(f"Could not extract '{filepath}' from '{archive_path}'")
                     return func(f, *args, **kwargs)
                 except KeyError:
                     raise FileNotFoundError(f"Neither '{inner_path}' nor '{filepath}' found in '{archive_path}'")
@@ -124,47 +122,104 @@ def extract_from_tar_class(func): # decorator to extract files from tar archives
             try:
                 member = tar.getmember(inner_path)
                 f = tar.extractfile(member)
-                if f is None:
-                    raise FileNotFoundError(f"Could not extract '{inner_path}' from '{archive_path}'")
                 return func(self, f, *args, **kwargs)
+            
             except KeyError:
                 # Fallback for the cluster
-                filepath = archive_path.split(os.sep)[:-1]
-                filepath = os.path.join(*filepath, inner_path)
-                print(filepath)
+                frame = [part for part in filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
+                filepath = os.path.join(frame, inner_path)
                 try:
                     member = tar.getmember(filepath)
                     f = tar.extractfile(member)
-                    if f is None:
-                        raise FileNotFoundError(f"Could not extract '{filepath}' from '{archive_path}'")
                     return func(self, f, *args, **kwargs)
                 except KeyError:
                     raise FileNotFoundError(f"Neither '{inner_path}' nor '{filepath}' found in '{archive_path}'")
     return wrapper
 
 
-def create_tar_archive_with_compression(file_list, output_filename, compression='gz'):
+def check_file_in_tar(archive_path, inner_path):
     """
-    Create TAR archive with different compression options
+    Check if a file exists within a compressed tar archive.
     
-    Args:
-        file_list: List of files to compress
-        output_filename: Output filename
-        compression: 'gz', 'bz2', 'xz', or None for no compression
+    Parameters
+    ----------
+    archive_path : str
+        Path to the tar archive (e.g., 'archive.tar.gz', 'archive.tar', etc.)
+    inner_path : str
+        Path to the file within the archive (e.g., 'folder/file.txt')
+        
+    Returns
+    -------
+    bool
+        True if the file exists in the archive, False otherwise
+        
+    Examples
+    --------
+    >>> check_file_in_tar('frame0001.tar.gz', 'chi.dat')
+    True
+    >>> check_file_in_tar('data.tar.gz', 'results/output.txt')
+    False
     """
-    if compression:
-        mode = f'w:{compression}'
-    else:
-        mode = 'w'
-    
-    with tarfile.open(output_filename, mode) as tar:
-        for file_path in file_list:
-            if os.path.exists(file_path):
-                tar.add(file_path, arcname=os.path.basename(file_path))
-                # print(f"Added {file_path}")
+    try:
+        with tarfile.open(archive_path, 'r:*') as tar:
+            try:
+                # Try to get the member - this will raise KeyError if not found
+                tar.getmember(inner_path)
+                return True
+            except KeyError:
+                # Fallback for the cluster
+                frame = [part for part in archive_path.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
+                filepath = os.path.join(frame, inner_path)
+                try:
+                    member = tar.getmember(filepath)
+                    return True
+                except KeyError:
+                    return False
+    except (tarfile.TarError, FileNotFoundError, OSError):
+        # Archive doesn't exist or is corrupted
+        return False
 
 
-def compress_directory(source_dir, output_filename, compression='gz'):
+def check_file_in_tar_path(full_path):
+    """
+    Check if a file exists within a tar archive using a full path notation.
+    
+    This function handles paths like 'archive.tar.gz/path/inside/file.txt' and
+    determines if the file exists within the archive.
+    
+    Parameters
+    ----------
+    full_path : str
+        Full path including the archive and internal path
+        (e.g., 'frame0001.tar.gz/chi.dat' or 'data.tar.gz/results/output.txt')
+        
+    Returns
+    -------
+    bool
+        True if the file exists in the archive, False otherwise
+        
+    Examples
+    --------
+    >>> check_file_in_tar_path('frame0001.tar.gz/chi.dat')
+    True
+    >>> check_file_in_tar_path('data.tar.gz/results/output.txt')
+    False
+    >>> check_file_in_tar_path('regular_file.txt')  # Not a tar path
+    False
+    """
+    # Check if this is a tar path
+    parts = full_path.split(os.sep)
+    for i, part in enumerate(parts):
+        if part.endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2')):
+            archive_path = os.sep.join(parts[:i + 1])
+            inner_path = os.sep.join(parts[i + 1:])
+            return check_file_in_tar(archive_path, inner_path)
+    
+    # Not a tar path, check if it's a regular file
+    return os.path.exists(full_path)
+
+
+def compress_directory(source_dir, output_filename, compression='gz', arcname=None):
     """
     Compress an entire directory into a tar archive
     
@@ -172,6 +227,7 @@ def compress_directory(source_dir, output_filename, compression='gz'):
         source_dir (str): Path to the directory to compress
         output_filename (str): Output filename for the archive
         compression (str): Compression method - 'gz', 'bz2', 'xz', or None for no compression
+        arcname (str, optional): Name to use for the archive inside the tar file. If None, uses the base name of source_dir.
     
     Returns:
         bool: True if successful, False otherwise
@@ -199,8 +255,11 @@ def compress_directory(source_dir, output_filename, compression='gz'):
             print(f"Warning: Output filename should end with '.tar' for uncompressed archives")
     
     try:
+        if arcname is None:
+            arcname = os.path.basename(source_dir)  # Use the base name of the source directory as the archive name
+
         with tarfile.open(output_filename, mode) as tar:
-            tar.add(source_dir, arcname=os.path.basename(source_dir))
+            tar.add(source_dir, arcname=arcname)
         
         print(f"Successfully created archive: {output_filename}")
         return True
@@ -421,7 +480,7 @@ def write_feff(potentials, atoms, title='FEFF8.5 input',  edge='K', s02=1.0, kma
     ''')
 
     inp = open(filename, 'w')
-    inp.write(f) # write all the settings information above
+    inp.write(f'!{f}') # write all the settings information above
 
     # now write POTENTIALS section
     inp.write('POTENTIALS\n')
@@ -447,6 +506,11 @@ def load_feff(chi_file):
     feff['k2chi'] = feff.k**2 * feff.chi
     feff = feff.query('k > 0') # remove k=0, if present
     return feff
+
+
+@extract_from_tar
+def load_path(chi_file):
+    return np.loadtxt(chi_file, comments='#')
 
 
 class EXAFS(ParallelAnalysisBase):
@@ -679,23 +743,23 @@ class Averager:
                 if not os.path.exists(frame_path):
                     raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
 
-                try:
-                    df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
-                    df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
-                    df['frame'] = frame  # add a frame column for reference
-                    df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
+                # try:
+                df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
+                df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
+                df['frame'] = frame  # add a frame column for reference
+                df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
 
-                    self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
-                    file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
-                    mypaths = []
-                    for g in self._graphs:
-                        file = file_map.get(g.graph["path_index"])
-                        if file:
-                            mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
+                self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
+                file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
+                mypaths = []
+                for g in self._graphs:
+                    file = file_map.get(g.graph["path_index"])
+                    if file:
+                        mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
 
-                except:
-                    print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
-                    continue
+                # except:
+                #     print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
+                #     continue
 
                 if df.shape[0] != len(mypaths):
                     print(f"Warning: Number of paths ({len(mypaths)}) does not match number of files ({df.shape[0]}) in {frame_path}. Skipping this frame.")
@@ -768,13 +832,16 @@ class Averager:
 
         run_per_path = partial(self._feff_per_path, paths=paths, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
 
-        # Use imap with chunksize for better load balancing and memory efficiency
-        with Pool(self.njobs) as worker_pool:
-            if self.progress_bar:
-                results = list(tqdm(worker_pool.imap(run_per_path, range(len(paths)), chunksize=chunk_size),
-                                   total=len(paths), desc='Processing paths'))
-            else:
-                results = worker_pool.map(run_per_path, range(len(paths)), chunksize=chunk_size)
+        if self.njobs > 1:
+            with Pool(self.njobs) as worker_pool:
+                if self.progress_bar:
+                    results = list(tqdm(worker_pool.imap(run_per_path, range(len(paths)), chunksize=chunk_size),
+                                    total=len(paths), desc='Processing paths'))
+                else:
+                    results = worker_pool.map(run_per_path, range(len(paths)), chunksize=chunk_size)
+        else:
+            # Single-threaded execution
+            results = tqdm([run_per_path(i) for i in range(len(paths))])
 
         # Convert to numpy array and sum in one operation
         self._result_array = np.array(results)
@@ -877,8 +944,19 @@ class Averager:
     @extract_from_tar_class
     def _graphs_from_paths_dat(self, filename):
         graphs = []
-        with open(filename) as f:
-            lines = f.readlines()
+        
+        # Handle both file paths and file-like objects
+        if hasattr(filename, 'read'):
+            # It's a file-like object (from tar)
+            content = filename.read()
+            if isinstance(content, bytes):
+                content = content.decode('utf-8')
+            lines = content.splitlines()
+        else:
+            # It's a file path
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+            lines = [line.rstrip('\n\r') for line in lines]  # Remove newlines for consistency
 
         i = 0
         while i < len(lines):
@@ -949,7 +1027,7 @@ class Averager:
                 break
         
         if header_line is None:
-            raise ValueError("Could not find dash line separator in the file")
+            raise ValueError(f"Could not find dash line separator in the file: {filename}")
 
         # Extract data lines (skip header line and column names)
         data_lines = lines[header_line + 1:]
@@ -1006,47 +1084,69 @@ class Averager:
         file_pattern = path.filename.split('.dat')[0]
         perform_calc = True  # flag to determine if we need to perform the calculation
 
-        # read in the text file if it has already been calculated
-        if os.path.exists(file_pattern+'_chi.dat'):
+        # check if the file pattern contains a tar archive
+        is_tar = False
+        parts = path.filename.split(os.sep)
+        for i, part in enumerate(parts):
+            if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
+                archive_path = os.sep.join(parts[:i + 1])
+                internal_path = os.sep.join(parts[i + 1:])
+                is_tar = True
+                break
 
-            data = np.loadtxt(file_pattern+'_chi.dat', comments='#')
+        # read in the text file if it has already been calculated
+        chi_file = file_pattern + '_chi.dat'
+        if check_file_in_tar_path(chi_file):
+
+            data = load_path(chi_file)
 
             if data[:,0].shape == k.shape: # check if the k values match
                 perform_calc = False
                 k2chi = data[:, 2]
                 path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
 
+            return k2chi
+
         if perform_calc:
 
-            is_tar = False
+            # If we are using a tar archive, we need to create a temporary feff path file
+            if is_tar:
+                rng = np.random.default_rng()
+                i = rng.integers(0, 1e6)
 
-            p = xafs.feffpath(path.filename, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
+                frame = [part for part in path.filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
+                filepath = os.path.join(frame, internal_path)
+                with tarfile.open(archive_path, 'r:*') as tar:
+                    while os.path.exists(f'./.tmp_path{i}'):
+                        i = rng.integers(0, 1e6)
+
+                    tmp_dir = f'./.tmp_path{i}'
+                    tar.extract(filepath, path=tmp_dir)
+                    
+                filepath = os.path.join(tmp_dir, filepath)
+
+            else:
+                filepath = path.filename
+
+            p = xafs.feffpath(filepath, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
             xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
             k2chi = p.chi * p.k**2  # k^2 * chi(k)
             path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
             
             # Save the results to a file
-            # check if the file pattern contains a tar archive
-            parts = file_pattern.split(os.sep)
-            for i, part in enumerate(parts):
-                if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
-                    archive_path = os.sep.join(parts[:i + 1])
-                    internal_path = os.sep.join(parts[i + 1:])
-                    is_tar = True
-                    break
-
             if is_tar:
-                # Create temporary file
-                with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                    temp_path = tmp.name
+                shutil.rmtree(tmp_dir)
 
+                tmp_dir = f'./.tmp_{frame}'
+                with tarfile.open(archive_path, 'r:*') as tar:
+                    tar.extractall(path=tmp_dir)  # extract the tar archive to a temporary directory
+
+                # add per frame chi to temporary directory
                 header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
-                np.savetxt(temp_path, np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
+                np.savetxt(os.path.join(tmp_dir, frame, internal_path.split('.dat')[0]+'_chi.dat'), np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
 
-                # Add to tar archive
-                mode = 'a' if os.path.exists(archive_path) else 'w:gz'
-                with tarfile.open(archive_path, mode) as tar:
-                    tar.add(temp_path, arcname=internal_path)
+                if compress_directory(tmp_dir, archive_path, compression='gz', arcname=''):
+                    shutil.rmtree(tmp_dir)  # remove the temporary directory after saving
 
             else: # just save to a regular file
                 header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
@@ -1671,7 +1771,7 @@ def read_files(filename):
             break
     
     if header_line is None:
-        raise ValueError("Could not find dash line separator in the file")
+        raise ValueError(f"Could not find dash line separator in the file: {filename}")
 
     # Extract data lines (skip header line and column names)
     data_lines = lines[header_line + 1:]

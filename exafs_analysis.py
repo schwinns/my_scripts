@@ -741,25 +741,28 @@ class Averager:
             for frame in frames:
                 frame_path = os.path.join(fd, f'frame{frame:04d}.tar.gz')
                 if not os.path.exists(frame_path):
-                    raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
+                    if os.path.exists(frame_path[:-7]): # check for non-archive directory
+                        compress_directory(frame_path[:-7], frame_path, compression='gz')
+                    else:
+                        raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
 
-                # try:
-                df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
-                df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
-                df['frame'] = frame  # add a frame column for reference
-                df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
+                try:
+                    df = self._read_files_dat(os.path.join(frame_path, 'files.dat'))
+                    df['file'] = df['file'].apply(lambda x: os.path.join(frame_path, x))
+                    df['frame'] = frame  # add a frame column for reference
+                    df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
 
-                self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
-                file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
-                mypaths = []
-                for g in self._graphs:
-                    file = file_map.get(g.graph["path_index"])
-                    if file:
-                        mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
+                    self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
+                    file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
+                    mypaths = []
+                    for g in self._graphs:
+                        file = file_map.get(g.graph["path_index"])
+                        if file:
+                            mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
 
-                # except:
-                #     print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
-                #     continue
+                except:
+                    print(f"Warning: Could not read files.dat or paths.dat in {frame_path}. Skipping this frame.")
+                    continue
 
                 if df.shape[0] != len(mypaths):
                     print(f"Warning: Number of paths ({len(mypaths)}) does not match number of files ({df.shape[0]}) in {frame_path}. Skipping this frame.")

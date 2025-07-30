@@ -125,9 +125,77 @@ class ParallelAnalysisBase(object):
         self._trajectory = trajectory
         self._verbose = verbose
 
-    def _setup_frames(self, trajectory, start=None, stop=None, step=None):
+    def _define_run_frames(
+        self, trajectory, start=None, stop=None, step=None, frames=None
+    ) -> Union[slice, np.ndarray]:
+        """Defines limits for the whole run, as passed by self.run() arguments
+
+        Parameters
+        ----------
+        trajectory : mda.Reader
+            a trajectory Reader
+        start : int, optional
+            start frame of analysis, by default None
+        stop : int, optional
+            stop frame of analysis, by default None
+        step : int, optional
+            number of frames to skip between each analysed frame, by default None
+        frames : array_like, optional
+            array of integers or booleans to slice trajectory; cannot be
+            combined with ``start``, ``stop``, ``step``; by default None
+
+        Returns
+        -------
+        Union[slice, np.ndarray]
+            Appropriate slicer for the trajectory that would give correct iteraction
+            order via trajectory[slicer]
+
+        Raises
+        ------
+        ValueError
+            if *both* `frames` and at least one of ``start``, ``stop``, or ``step``
+            is provided (i.e. set to not ``None`` value).
+
+
+        .. versionadded:: 2.8.0
         """
-        Pass a Reader object and define the desired iteration pattern
+        self._trajectory = trajectory
+        if frames is not None:
+            if not all(opt is None for opt in [start, stop, step]):
+                raise ValueError(
+                    "start/stop/step cannot be combined with frames"
+                )
+            slicer = frames
+        else:
+            start, stop, step = trajectory.check_slice_indices(
+                start, stop, step
+            )
+            slicer = slice(start, stop, step)
+        self.start, self.stop, self.step = start, stop, step
+        return slicer
+
+    def _prepare_sliced_trajectory(self, slicer: Union[slice, np.ndarray]):
+        """Prepares sliced trajectory for use in subsequent parallel computations:
+        namely, assigns self._sliced_trajectory and its appropriate attributes,
+        self.n_frames, self.frames and self.times.
+
+        Parameters
+        ----------
+        slicer : Union[slice, np.ndarray]
+            appropriate slicer for the trajectory
+
+
+        .. versionadded:: 2.8.0
+        """
+        self._sliced_trajectory = self._trajectory[slicer]
+        self.n_frames = len(self._sliced_trajectory)
+        self.frames = np.zeros(self.n_frames, dtype=int)
+        self.times = np.zeros(self.n_frames)
+
+    def _setup_frames(
+        self, trajectory, start=None, stop=None, step=None, frames=None
+    ):
+        """Pass a Reader object and define the desired iteration pattern
         through the trajectory
 
         Parameters
@@ -140,20 +208,37 @@ class ParallelAnalysisBase(object):
             stop frame of analysis
         step : int, optional
             number of frames to skip between each analysed frame
+        frames : array_like, optional
+            array of integers or booleans to slice trajectory; cannot be
+            combined with ``start``, ``stop``, ``step``
+
+            .. versionadded:: 2.2.0
+
+        Raises
+        ------
+        ValueError
+            if *both* `frames` and at least one of ``start``, ``stop``, or
+            ``frames`` is provided (i.e., set to another value than ``None``)
 
 
         .. versionchanged:: 1.0.0
             Added .frames and .times arrays as attributes
 
+        .. versionchanged:: 2.2.0
+            Added ability to iterate through trajectory by passing a list of
+            frame indices in the `frames` keyword argument
+
+        .. versionchanged:: 2.8.0
+            Split function into two: :meth:`_define_run_frames` and
+            :meth:`_prepare_sliced_trajectory`: first one defines the limits
+            for the whole run and is executed once during :meth:`run` in
+            :meth:`_setup_frames`, second one prepares sliced trajectory for
+            each of the workers and gets executed twice: one time in
+            :meth:`_setup_frames` for the whole trajectory, second time in
+            :meth:`_compute` for each of the computation groups.
         """
-        self._trajectory = trajectory
-        start, stop, step = trajectory.check_slice_indices(start, stop, step)
-        self.start = start
-        self.stop = stop
-        self.step = step
-        self.n_frames = len(range(start, stop, step))
-        self.frames = np.zeros(self.n_frames, dtype=int)
-        self.times = np.zeros(self.n_frames)
+        slicer = self._define_run_frames(trajectory, start, stop, step, frames)
+        self._prepare_sliced_trajectory(slicer)
 
     def _single_frame(self, frame_idx):
         """Calculate data from a single frame of trajectory

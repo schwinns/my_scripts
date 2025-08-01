@@ -35,6 +35,7 @@ from six.moves import range, zip
 import inspect
 import logging
 import itertools
+from typing import Union
 import warnings
 
 import numpy as np
@@ -258,7 +259,7 @@ class ParallelAnalysisBase(object):
         """
         pass  # pylint: disable=unnecessary-pass
 
-    def run(self, start=None, stop=None, step=None, verbose=None, njobs=-1):
+    def run(self, start=None, stop=None, step=None, frames=None, verbose=None, njobs=-1):
         """Perform the calculation
 
         Parameters
@@ -271,6 +272,9 @@ class ParallelAnalysisBase(object):
             number of frames to skip between each analysed frame
         verbose : bool, optional
             Turn on verbosity
+        frames : array_like, optional
+            array of integers or booleans to slice trajectory; cannot be
+            combined with ``start``, ``stop``, ``step`
         njobs : int, optional
             number of cores to use for parallelization, default=-1 means all available
         """
@@ -279,7 +283,7 @@ class ParallelAnalysisBase(object):
         verbose = getattr(self, '_verbose',
                           False) if verbose is None else verbose
 
-        self._setup_frames(self._trajectory, start, stop, step)
+        self._setup_frames(self._trajectory, start, stop, step, frames)
         logger.info("Starting preparation")
         self._prepare()
 
@@ -303,7 +307,7 @@ class ParallelAnalysisBase(object):
             else:
                 n = njobs
 
-            print(f'Running with {n} CPUs')
+            logger.info(f'Running with {n} CPUs')
             frame_values = np.arange(len(self._trajectory[self.start:self.stop:self.step]))
 
             with Pool(n) as worker_pool:

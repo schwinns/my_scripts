@@ -480,7 +480,7 @@ def write_feff(potentials, atoms, title='FEFF8.5 input',  edge='K', s02=1.0, kma
     ''')
 
     inp = open(filename, 'w')
-    inp.write(f'!{f}') # write all the settings information above
+    inp.write(f'{f}') # write all the settings information above
 
     # now write POTENTIALS section
     inp.write('POTENTIALS\n')
@@ -742,6 +742,7 @@ class Averager:
                 frame_path = os.path.join(fd, f'frame{frame:04d}.tar.gz')
                 if not os.path.exists(frame_path):
                     if os.path.exists(frame_path[:-7]): # check for non-archive directory
+                        raise FileNotFoundError(f"Frame directory {frame_path} is not compressed.")
                         compress_directory(frame_path[:-7], frame_path, compression='gz')
                     else:
                         raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
@@ -833,7 +834,9 @@ class Averager:
             # Adaptive chunk size: balance between overhead and load balancing
             chunk_size = max(1, len(paths) // (self.njobs * 4))
 
-        run_per_path = partial(self._feff_per_path, paths=paths, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
+        # run_per_path = partial(_feff_per_path, paths=paths, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
+        filenames = [p.filename for p in paths]
+        run_per_path = partial(_feff_per_path, filenames=filenames, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
 
         if self.njobs > 1:
             with Pool(self.njobs) as worker_pool:
@@ -1055,108 +1058,114 @@ class Averager:
         return df
 
 
-    def _feff_per_path(self, idx, paths, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
-        '''
-        Function to read a FEFF path file and calculate the chi(k) for a single path.
-        
-        Parameters
-        ----------
-        idx : int
-            Index of the FEFF path file from a list of file paths.
-        paths : list of ScatteringPath objects
-            List of ScatteringPath objects containing the FEFF path data.
-        k : np.ndarray
-            k-space points at which to calculate chi(k).
-        deltar : float, optional
-            Delta R parameter for the FEFF calculation. Default is 0.0.
-        e0 : float, optional
-            E0 parameter for the FEFF calculation. Default is 0.0.
-        sigma2 : float, optional
-            Sigma^2 parameter for the FEFF calculation. Default is 0.0.
-        s02 : float, optional
-            S0^2 parameter for the FEFF calculation. Default is 1.0.
+# def _feff_per_path(idx, paths, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
+def _feff_per_path(idx, filenames, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
+    '''
+    Function to read a FEFF path file and calculate the chi(k) for a single path.
+    
+    Parameters
+    ----------
+    idx : int
+        Index of the FEFF path file from a list of file paths.
+    paths : list of ScatteringPath objects
+        List of ScatteringPath objects containing the FEFF path data.
+    k : np.ndarray
+        k-space points at which to calculate chi(k).
+    deltar : float, optional
+        Delta R parameter for the FEFF calculation. Default is 0.0.
+    e0 : float, optional
+        E0 parameter for the FEFF calculation. Default is 0.0.
+    sigma2 : float, optional
+        Sigma^2 parameter for the FEFF calculation. Default is 0.0.
+    s02 : float, optional
+        S0^2 parameter for the FEFF calculation. Default is 1.0.
 
-        Returns
-        -------
-        k2chi : np.ndarray
-            Calculated k^2*chi(k) for the given FEFF path.
-        
-        '''
-        
-        path = paths[idx]
-        file_pattern = path.filename.split('.dat')[0]
-        perform_calc = True  # flag to determine if we need to perform the calculation
+    Returns
+    -------
+    k2chi : np.ndarray
+        Calculated k^2*chi(k) for the given FEFF path.
+    
+    '''
+    
+    # path = paths[idx]
+    # file_pattern = path.filename.split('.dat')[0]
+    filename = filenames[idx]
+    file_pattern = filename.split('.dat')[0]
+    perform_calc = True  # flag to determine if we need to perform the calculation
 
-        # check if the file pattern contains a tar archive
-        is_tar = False
-        parts = path.filename.split(os.sep)
-        for i, part in enumerate(parts):
-            if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
-                archive_path = os.sep.join(parts[:i + 1])
-                internal_path = os.sep.join(parts[i + 1:])
-                is_tar = True
-                break
+    # check if the file pattern contains a tar archive
+    is_tar = False
+    # parts = path.filename.split(os.sep)
+    parts = filename.split(os.sep)
+    for i, part in enumerate(parts):
+        if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
+            archive_path = os.sep.join(parts[:i + 1])
+            internal_path = os.sep.join(parts[i + 1:])
+            is_tar = True
+            break
 
-        # read in the text file if it has already been calculated
-        chi_file = file_pattern + '_chi.dat'
-        if check_file_in_tar_path(chi_file):
+    # read in the text file if it has already been calculated
+    chi_file = file_pattern + '_chi.dat'
+    if check_file_in_tar_path(chi_file):
 
-            data = load_path(chi_file)
+        data = load_path(chi_file)
 
-            if data[:,0].shape == k.shape: # check if the k values match
-                perform_calc = False
-                k2chi = data[:, 2]
-                path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
-
-            return k2chi
-
-        if perform_calc:
-
-            # If we are using a tar archive, we need to create a temporary feff path file
-            if is_tar:
-                rng = np.random.default_rng()
-                i = rng.integers(0, 1e6)
-
-                frame = [part for part in path.filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
-                filepath = os.path.join(frame, internal_path)
-                with tarfile.open(archive_path, 'r:*') as tar:
-                    while os.path.exists(f'./.tmp_path{i}'):
-                        i = rng.integers(0, 1e6)
-
-                    tmp_dir = f'./.tmp_path{i}'
-                    tar.extract(filepath, path=tmp_dir)
-                    
-                filepath = os.path.join(tmp_dir, filepath)
-
-            else:
-                filepath = path.filename
-
-            p = xafs.feffpath(filepath, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
-            xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
-            k2chi = p.chi * p.k**2  # k^2 * chi(k)
-            path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
-            
-            # Save the results to a file
-            if is_tar:
-                shutil.rmtree(tmp_dir)
-
-                tmp_dir = f'./.tmp_{frame}'
-                with tarfile.open(archive_path, 'r:*') as tar:
-                    tar.extractall(path=tmp_dir)  # extract the tar archive to a temporary directory
-
-                # add per frame chi to temporary directory
-                header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
-                np.savetxt(os.path.join(tmp_dir, frame, internal_path.split('.dat')[0]+'_chi.dat'), np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
-
-                if compress_directory(tmp_dir, archive_path, compression='gz', arcname=''):
-                    shutil.rmtree(tmp_dir)  # remove the temporary directory after saving
-
-            else: # just save to a regular file
-                header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
-                np.savetxt(f'{file_pattern}_chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
-
+        if data[:,0].shape == k.shape: # check if the k values match
+            perform_calc = False
+            k2chi = data[:, 2]
+            # path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
 
         return k2chi
+
+    if perform_calc:
+
+        # If we are using a tar archive, we need to create a temporary feff path file
+        if is_tar:
+            rng = np.random.default_rng()
+            i = rng.integers(0, 1e6)
+
+            # frame = [part for part in path.filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
+            frame = [part for part in filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
+            filepath = os.path.join(frame, internal_path)
+            with tarfile.open(archive_path, 'r:*') as tar:
+                while os.path.exists(f'./.tmp_path{i}'):
+                    i = rng.integers(0, 1e6)
+
+                tmp_dir = f'./.tmp_path{i}'
+                tar.extract(filepath, path=tmp_dir)
+                
+            filepath = os.path.join(tmp_dir, filepath)
+
+        else:
+            # filepath = path.filename
+            filepath = filename
+
+        p = xafs.feffpath(filepath, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
+        xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
+        k2chi = p.chi * p.k**2  # k^2 * chi(k)
+        # path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
+        
+        # # Save the results to a file
+        if is_tar:
+            shutil.rmtree(tmp_dir)
+
+        #     tmp_dir = f'./.tmp_{frame}'
+        #     with tarfile.open(archive_path, 'r:*') as tar:
+        #         tar.extractall(path=tmp_dir)  # extract the tar archive to a temporary directory
+
+        #     # add per frame chi to temporary directory
+        #     header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
+        #     np.savetxt(os.path.join(tmp_dir, frame, internal_path.split('.dat')[0]+'_chi.dat'), np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
+
+        #     if compress_directory(tmp_dir, archive_path, compression='gz', arcname=''):
+        #         shutil.rmtree(tmp_dir)  # remove the temporary directory after saving
+
+        # else: # just save to a regular file
+        #     header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
+        #     np.savetxt(f'{file_pattern}_chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
+
+
+    return k2chi
 
 
 def feff_per_path(file_idx, files, k, params=None, scattering_paths=None, cluster_map=None, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):

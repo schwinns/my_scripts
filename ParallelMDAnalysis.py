@@ -453,3 +453,64 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
         self.rdf = rdf
         self.results.rdf = rdf
+
+
+class ParallelCoordinationNumbers(ParallelAnalysisBase):
+    r"""Calculate the time-series of coordination numbers between two groups of atoms.
+
+    Arguments
+    ---------
+    g1 : AtomGroup
+      First AtomGroup
+    g2 : AtomGroup
+      Second AtomGroup
+    cutoff : float
+      Cutoff distance for coordination number calculation, default is 3.5 Angstroms.
+    exclusion_block : tuple (optional)
+          A tuple representing the tile to exclude from the distance
+          array. [None]
+
+    """
+    def __init__(self, g1, g2,
+                 cutoff=3.5, exclusion_block=None,
+                 **kwargs):
+        super(ParallelCoordinationNumbers, self).__init__(g1.universe.trajectory, **kwargs)
+        self.g1 = g1
+        self.g2 = g2
+        self.u = g1.universe
+
+        self.cn_settings = {'cutoff': cutoff}
+        self._exclusion_block = exclusion_block
+
+    def _prepare(self):
+        
+        # create a Results object to hold the results
+        self.results = Results()
+        self.results.cn = np.zeros((len(self.u.trajectory), len(self.g1)))
+
+
+    def _single_frame(self, frame_idx):
+        self._frame_index = frame_idx
+        self._ts = self.u.trajectory[frame_idx]
+
+        pairs, dist = distances.capped_distance(self.g1.positions,
+                                                self.g2.positions,
+                                                self.cn_settings['cutoff'], # calculates the pairs that are within the cutoff
+                                                box=self.u.dimensions)
+        # Maybe exclude same molecule distances
+        if self._exclusion_block is not None:
+            idxA, idxB = pairs[:, 0]//self._exclusion_block[0], pairs[:, 1]//self._exclusion_block[1]
+            mask = np.where(idxA != idxB)[0]
+            dist = dist[mask]
+
+        cn = np.zeros(len(self.g1))
+        for i in range(len(self.g1)):
+            cn[i] = (pairs[:, 0] == i).sum()
+
+        return cn
+
+    def _conclude(self):
+        # gather the results from all processes and sum
+        res = np.array(self._result)
+
+        self.results.cn = res

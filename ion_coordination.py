@@ -219,4 +219,4 @@ class IonAnalysis:
             axes.append(ax)
             plt.savefig(f'{key}.png', dpi=300)
 
-        return ax
+        return axes

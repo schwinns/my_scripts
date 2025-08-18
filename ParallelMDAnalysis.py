@@ -366,6 +366,17 @@ class ParallelInterRDF(ParallelAnalysisBase):
     within the same molecule.  For example, if there are 7 of each
     atom in each molecule, the exclusion mask `(7, 7)` can be used.
 
+    The attribute :attr:`rdf_settings` contains the settings used for the
+    calculation, such as the number of bins and the range. This can be modified
+    to pass more options to the histogram function, such as weights.
+
+    If passing weights, the `weights` should be an array, list, or a callable
+    function that returns an array of weights for each pair of atoms (as determined, for 
+    instance, by `mdanalysis.lib.distances.capped_distances`). For example, to weight by charge::
+
+      weights = lambda pairs : [g1[a1].charge*g2[a2].charge for a1,a2 in pairs]
+      rdf.rdf_settings['weights'] = weights
+
 
     .. versionadded:: 0.13.0
 
@@ -384,11 +395,19 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
         self.rdf_settings = {'bins': nbins,
                              'range': range}
+        
+        # Set the max range to filter the search radius
+        self._maxrange = self.rdf_settings['range'][1]
+        
         self._exclusion_block = exclusion_block
 
     def _prepare(self):
         # Empty histogram to store the RDF
-        count, edges = np.histogram([-1], **self.rdf_settings)
+        rdf_settings_copy = self.rdf_settings.copy()
+        if 'weights' in rdf_settings_copy:
+            del rdf_settings_copy['weights']
+
+        count, edges = np.histogram([-1]*self.n_pairs, **rdf_settings_copy)
         count = count.astype(np.float64)
         count *= 0.0
         self.count = count
@@ -397,8 +416,6 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
         # Need to know average volume
         self.volume = 0.0
-        # Set the max range to filter the search radius
-        self._maxrange = self.rdf_settings['range'][1]
 
         # create a Results object to hold the results
         self.results = Results()
@@ -419,8 +436,22 @@ class ParallelInterRDF(ParallelAnalysisBase):
             mask = np.where(idxA != idxB)[0]
             dist = dist[mask]
 
+        # check for weights
+        rdf_settings_copy = self.rdf_settings.copy()
+        if 'weights' in self.rdf_settings:
+            if isinstance(self.rdf_settings['weights'], (np.ndarray, list)):
+                weights = self.rdf_settings['weights']
+            elif callable(self.rdf_settings['weights']):
+                weights = self.rdf_settings['weights'](pairs)
+            else:
+                raise TypeError("weights must be an array, list, or callable function")
+            
+            del rdf_settings_copy['weights']
 
-        count = np.histogram(dist, **self.rdf_settings)[0]
+        else:
+            weights = None
+
+        count = np.histogram(dist, weights=weights, **rdf_settings_copy)[0]
 
         return count, self._ts.volume # return, rather than accumulate
 
@@ -430,10 +461,17 @@ class ParallelInterRDF(ParallelAnalysisBase):
             self.count += res[0]
             self.volume += res[1]
 
-        # Number of each selection
+        # Number of each selection, if weights then weight the number
         nA = len(self.g1)
         nB = len(self.g2)
         N = nA * nB
+
+        if 'weights' in self.rdf_settings:
+            if isinstance(self.rdf_settings['weights'], (np.ndarray, list)):
+                N = sum(self.rdf_settings['weights'])
+            elif callable(self.rdf_settings['weights']):
+                pairs = itertools.product(range(nA), range(nB))
+                N = sum(self.rdf_settings['weights'](pairs))
 
         # If we had exclusions, take these into account
         if self._exclusion_block:
@@ -445,7 +483,7 @@ class ParallelInterRDF(ParallelAnalysisBase):
         vol = np.power(self.edges[1:], 3) - np.power(self.edges[:-1], 3)
         vol *= 4/3.0 * np.pi
 
-        # Average number density
+        # Average density
         box_vol = self.volume / self.n_frames
         density = N / box_vol
 
@@ -453,6 +491,17 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
         self.rdf = rdf
         self.results.rdf = rdf
+
+    @property
+    def n_pairs(self):
+        """Return the number of pairs up to max_range"""
+        pairs = distances.capped_distance(self.g1.positions,
+                                          self.g2.positions,
+                                          self._maxrange,
+                                          box=self.u.dimensions,
+                                          return_distances=False)
+
+        return len(pairs)
 
 
 class ParallelCoordinationNumbers(ParallelAnalysisBase):

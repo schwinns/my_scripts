@@ -255,14 +255,15 @@ class GromacsTopology:
 
         # read included files and add to self.cleaned
         incl_idx = [i for i,line in enumerate(self.cleaned) if line.startswith('#include')]
+        tmp_cleaned = self.cleaned[:incl_idx[0]]
         for idx in incl_idx:
             incl_file = self.cleaned[idx].split('"')[1]
-            cleaned_top = self.cleaned[:idx]
-            cleaned_bott = self.cleaned[idx+1:]
             incl = open(incl_file, 'r').readlines()
             tmp = [line for line in incl if not line.startswith(';')]
             incl_clean = [line for line in tmp if not len(line.split()) == 0]
-            self.cleaned = cleaned_top + incl_clean + cleaned_bott
+            tmp_cleaned += incl_clean
+
+        self.cleaned = tmp_cleaned + self.cleaned[incl_idx[-1]+1:]
 
         # initialize some objects to store data
         self.n_atoms = 0

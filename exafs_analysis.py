@@ -363,7 +363,56 @@ def find_files_dat_files(base_path):
     return glob(os.path.join(base_path, '**', 'files.dat'), recursive=True)
 
 
-def write_feff(potentials, atoms, title='FEFF8.5 input',  edge='K', s02=1.0, kmax=20, 
+def write_feff6(potentials, atoms, title='FEFF6L input', print_vals=[0,0,0,0], control=[1,1,1,1],
+                filename='feff.inp'):
+    '''
+    Write a FEFF6L input file. This function writes a typical FEFF input to generate EXAFS chi(k).
+    More advanced options are not included here. Defaults are taken from the defaults for FEFF.
+    
+    potentials : list
+        List of POTENTIALS lines, expects {ipot: >3} {atomic_number: >8} {tag: >8}\n\
+    atoms : list
+        List of ATOMS lines, expects {pos_x: .8f} {pos_y: .8f} {pos_z: .8f} {ipot: <8} {tag: <8}\n for each line
+    title : str
+        TITLE for the file, default='FEFF6L input'
+    print_vals : list
+        List of length 4 with the output options, default=[0,0,0,0]
+    control : list
+        List of length 6 with the modules to run, default=[1,1,1,1] means run all
+
+    '''
+
+    f = dedent(f'''\
+        TITLE     {title}
+
+        *         pot xsph fms path genfmt ff2x
+        CONTROL   {list2str(control)}
+        PRINT     {list2str(print_vals)}   
+        
+    ''')
+
+    inp = open(filename, 'w')
+    inp.write(f'{f}') # write all the settings information above
+
+    # now write POTENTIALS section
+    inp.write('POTENTIALS\n')
+    inp.write('* ipot    Z        tag      lmax1      lmax2      xnatph      spinph\n')
+    inp.writelines(potentials)
+
+    # now write ATOMS section
+    inp.write('\nATOMS\n')
+    inp.write('* x           y           z          ipot     tag\n')
+    inp.writelines(atoms)
+
+    # END
+    inp.write('END')
+
+    inp.close()
+
+    return filename
+
+
+def write_feff8(potentials, atoms, title='FEFF8.5 input',  edge='K', s02=1.0, kmax=20, 
                print_vals=[0,0,0,0,0,3], control=[1,1,1,1,1,1], exchange=[0,0.0,0.0], 
                cfaverage=[0,1,0], scf=[6,0,30,0.2], ion=[], tdlda=0, debye=[], rpath=None,
                nleg=8, criteria=[4,2.5], filename='feff.inp'):
@@ -521,18 +570,24 @@ class EXAFS(ParallelAnalysisBase):
     ----------
     absorber : MDAnalysis.AtomGroup
         AtomGroup containing the absorber atom, i.e. the atom around which to calculate the EXAFS.
+    feff_writer : function
+        Function to write the FEFF input file. Should be one of `write_feff8` or `write_feff6`, depending
+        on which version of FEFF you are using. Default is write_feff8.
     write_feff_kwargs : dict
         Dictionary of keyword arguments to pass to the `write_feff` function, which writes the FEFF input file.
         This can include parameters like `edge`, `s02`, `kmax`, etc. See the `write_feff` function for details.
     dir : str
         Directory to write the FEFF input files and results. Default is './'.
+    feff_callable : callable
+        Callable function to generate the FEFF input file. If None, defaults to `xafs.feff8l`. The callable should
+        take two arguments: folder and feffinp, which are the location to run FEFF and the FEFF input file.
     **kwargs : dict
         Additional keyword arguments passed to the base class.
 
     Results are available through the :attr:`results`.
     
     '''
-    def __init__(self, absorber, write_feff_kwargs={}, dir='./', **kwargs):
+    def __init__(self, absorber, feff_writer=write_feff8, write_feff_kwargs={}, dir='./', feff_callable=None, **kwargs):
         super(EXAFS, self).__init__(absorber.universe.trajectory, **kwargs)
         self.absorber = absorber[0] # ensure we have a single atom
         self.u = absorber.universe
@@ -543,6 +598,13 @@ class EXAFS(ParallelAnalysisBase):
 
         if not os.path.exists(self.dir):
             run(f'mkdir {self.dir}')  # create the directory if it does not exist
+
+        self.write_feff = feff_writer
+
+        if feff_callable is None:
+            self.feff_callable = xafs.feff8l
+        else:
+            self.feff_callable = feff_callable
 
         self.feff_settings = write_feff_kwargs
 
@@ -599,9 +661,9 @@ class EXAFS(ParallelAnalysisBase):
 
         # write FEFF input and run
         run(f'mkdir {self.dir}frame{frame_idx:04d}')
-        inp = write_feff(potential_lines, atom_lines, filename=f'{self.dir}frame{frame_idx:04d}/feff.inp',
+        inp = self.write_feff(potential_lines, atom_lines, filename=f'{self.dir}frame{frame_idx:04d}/feff.inp',
                          **self.feff_settings)
-        feff = xafs.feff8l(folder=f'{self.dir}frame{frame_idx:04d}', feffinp=inp)
+        feff = self.feff_callable(folder=f'{self.dir}frame{frame_idx:04d}', feffinp=inp)
 
         # report results and time for this frame
         df = load_feff(f'{self.dir}frame{frame_idx:04d}/chi.dat')
@@ -834,7 +896,6 @@ class Averager:
             # Adaptive chunk size: balance between overhead and load balancing
             chunk_size = max(1, len(paths) // (self.njobs * 4))
 
-        # run_per_path = partial(_feff_per_path, paths=paths, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
         filenames = [p.filename for p in paths]
         run_per_path = partial(_feff_per_path, filenames=filenames, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
 
@@ -847,7 +908,9 @@ class Averager:
                     results = worker_pool.map(run_per_path, range(len(paths)), chunksize=chunk_size)
         else:
             # Single-threaded execution
-            results = tqdm([run_per_path(i) for i in range(len(paths))])
+            results = []
+            for i in tqdm(range(len(paths))):
+                results.append(run_per_path(i))
 
         # Convert to numpy array and sum in one operation
         self._result_array = np.array(results)
@@ -1058,7 +1121,6 @@ class Averager:
         return df
 
 
-# def _feff_per_path(idx, paths, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
 def _feff_per_path(idx, filenames, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
     '''
     Function to read a FEFF path file and calculate the chi(k) for a single path.
@@ -1086,16 +1148,12 @@ def _feff_per_path(idx, filenames, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
         Calculated k^2*chi(k) for the given FEFF path.
     
     '''
-    
-    # path = paths[idx]
-    # file_pattern = path.filename.split('.dat')[0]
     filename = filenames[idx]
     file_pattern = filename.split('.dat')[0]
     perform_calc = True  # flag to determine if we need to perform the calculation
 
     # check if the file pattern contains a tar archive
     is_tar = False
-    # parts = path.filename.split(os.sep)
     parts = filename.split(os.sep)
     for i, part in enumerate(parts):
         if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
@@ -1113,9 +1171,7 @@ def _feff_per_path(idx, filenames, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
         if data[:,0].shape == k.shape: # check if the k values match
             perform_calc = False
             k2chi = data[:, 2]
-            # path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
-
-        return k2chi
+            return k2chi
 
     if perform_calc:
 
@@ -1124,183 +1180,35 @@ def _feff_per_path(idx, filenames, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
             rng = np.random.default_rng()
             i = rng.integers(0, 1e6)
 
-            # frame = [part for part in path.filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
             frame = [part for part in filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
-            filepath = os.path.join(frame, internal_path)
             with tarfile.open(archive_path, 'r:*') as tar:
                 while os.path.exists(f'./.tmp_path{i}'):
                     i = rng.integers(0, 1e6)
 
                 tmp_dir = f'./.tmp_path{i}'
+                files = tar.getnames()
+                if os.path.join(frame, internal_path) in files: # in case the tarfile has frame/internal_path
+                    filepath = os.path.join(frame, internal_path)
+                elif os.path.join(internal_path) in files:
+                    filepath = internal_path
+                else:
+                    raise FileNotFoundError(f'File {internal_path} not found in tar archive {archive_path}')
+
                 tar.extract(filepath, path=tmp_dir)
-                
+
             filepath = os.path.join(tmp_dir, filepath)
 
         else:
-            # filepath = path.filename
             filepath = filename
 
         p = xafs.feffpath(filepath, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
         xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
         k2chi = p.chi * p.k**2  # k^2 * chi(k)
-        # path.k2chi = k2chi  # save k^2*chi(k) in the path object for later use
         
-        # # Save the results to a file
         if is_tar:
             shutil.rmtree(tmp_dir)
 
-        #     tmp_dir = f'./.tmp_{frame}'
-        #     with tarfile.open(archive_path, 'r:*') as tar:
-        #         tar.extractall(path=tmp_dir)  # extract the tar archive to a temporary directory
-
-        #     # add per frame chi to temporary directory
-        #     header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
-        #     np.savetxt(os.path.join(tmp_dir, frame, internal_path.split('.dat')[0]+'_chi.dat'), np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
-
-        #     if compress_directory(tmp_dir, archive_path, compression='gz', arcname=''):
-        #         shutil.rmtree(tmp_dir)  # remove the temporary directory after saving
-
-        # else: # just save to a regular file
-        #     header = f'deltar={deltar:.3f} e0={e0:.3f} sigma2={sigma2:.3f} s02={s02:.3f}\n# k chi k2chi'
-        #     np.savetxt(f'{file_pattern}_chi.dat', np.column_stack((p.k, p.chi, k2chi)), header=header, fmt='%.6f %.6f %.6f')
-
-
     return k2chi
-
-
-def feff_per_path(file_idx, files, k, params=None, scattering_paths=None, cluster_map=None, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
-    '''
-    Function to read a FEFF path file and calculate the chi(k) for a single path.
-    
-    Parameters
-    ----------
-    file_idx : int
-        Index of the FEFF path file from a list of file paths.
-    files : list of str
-        List of FEFF path files.
-    k : np.ndarray
-        k-space points at which to calculate chi(k).
-    params : np.ndarray, optional
-        Parameters for the FEFF calculation, structured as a 2D array with shape (n_files, 3).
-        Each row corresponds to a different path and contains [deltar, e0, sigma2]. Default is None,
-        which means the parameters will be used as specified with the below keywords.
-    scattering_paths : list of ScatteringPath objects, optional
-        List of ScatteringPath objects, each representing a scattering path with its associated cluster.
-    cluster_map : dict, optional
-        Dictionary mapping each cluster to a parameter index. This is used to determine which parameters
-        to apply to each path.
-    deltar : float, optional
-        Delta R parameter for the FEFF calculation. Default is 0.0.
-    e0 : float, optional
-        E0 parameter for the FEFF calculation. Default is 0.0.
-    sigma2 : float, optional
-        Sigma^2 parameter for the FEFF calculation. Default is 0.0.
-    s02 : float, optional
-        S0^2 parameter for the FEFF calculation. Default is 1.0.
-
-    Returns
-    -------
-    chi : np.ndarray
-        Calculated chi(k) for the given FEFF path.
-    
-    '''
-    
-    file = files[file_idx]
-
-    if params is not None and scattering_paths is not None and cluster_map is not None:
-        mypath = scattering_paths[file_idx]  # get the ScatteringPath object for this file
-        parameter_idx = cluster_map[mypath.cluster_key]  # get the parameter index for this path
-        (deltar, e0, sigma2) = params[parameter_idx,:]
-
-    path = xafs.feffpath(file, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
-    xafs.path2chi(path, k=k) # calculate chi(k) for the path at the same points as experimental data
-    k2chi = path.chi * path.k**2  # k^2 * chi(k)
-    return k2chi
-            
-
-def feff_average_paths_equal(params, k, filepath='./frame*/', top_paths=-1, sort_by_amp_ratio=False, njobs=1, progress_bar=True):
-    '''
-    Function to average k^2*chi(k) from multiple FEFF calculations assuming all paths have the same parameters
-    
-    Parameters
-    ----------
-    params : np.ndarray
-        Parameters for the FEFF calculations. These are structured as follows:
-        [deltar, e0, sigma2]
-        where each element corresponds to a different parameter in the chi(k) calculation.
-    k : np.ndarray
-        k-space points at which to calculate chi(k).
-    filepath : str, optional
-        Path to the directory containing the FEFF files. Default is './frames*/'.
-    top_paths : int
-        Number of top paths to consider for averaging. Default is -1, which means all paths are considered.
-    sort_by_amp_ratio : bool, optional
-        If True, the paths will be sorted by their amplitude ratio before selecting the top paths.
-        Default is False.
-    njobs : int, optional
-        Number of parallel jobs to run. Default is 1 (no parallelization).
-        If set to -1, it will use all available CPU cores.
-    progress_bar : bool, optional
-        If True, a progress bar will be displayed during the processing of paths. Default is True
-
-    Returns
-    -------
-    k2chi : np.ndarray
-        Averaged k^2*chi(k) values across all frames, structured as a 1D array with same shape as experiment.
-
-    '''
-
-    # Unpack parameters
-    deltar = params[0]
-    e0 = params[1]
-    sigma2 = params[2]
-
-    # parallelize
-    if njobs == -1:
-        n = multiprocessing.cpu_count()
-    else:
-        n = njobs
-
-    # format filepath
-    if not filepath.endswith('/'):
-        filepath += '/'
-    
-    # Find all files.dat files recursively
-    files_dat_list = find_files_dat_files(filepath)
-    n_frames = len(files_dat_list) # count number of frames
-
-    paths = []
-    for files_dat in files_dat_list:
-
-        try:
-            files = read_files(files_dat)
-        except:
-            print(f'Error reading {files_dat}, skipping...')
-            n_frames -= 1 # decrement frame count if this file cannot be read
-            continue
-        
-        if sort_by_amp_ratio:
-            files.sort_values('amp_ratio', inplace=True, ascending=False) # get the paths with highest amp_ratio
-        
-        frame_dir = os.path.dirname(files_dat)
-        frame_paths = [os.path.join(frame_dir, f) for f in files.file.values[:top_paths]] if top_paths != -1 else [os.path.join(frame_dir, f) for f in files.file.values]
-        paths.extend(frame_paths)
-
-    run_per_path = partial(feff_per_path, files=paths, k=k, deltar=deltar, e0=e0, sigma2=sigma2, s02=0.816)
-
-    if progress_bar:
-        with Pool(n) as worker_pool:
-            result = []
-            for r in tqdm(worker_pool.imap_unordered(run_per_path, np.arange(len(paths))), total=len(paths), desc='Processing paths'):
-                result.append(r)
-
-    else:
-        with Pool(n) as worker_pool:
-            result = worker_pool.map(run_per_path, np.arange(len(paths)))
-
-    result = np.asarray(result) 
-    
-    return result.sum(axis=0) / n_frames  # sum over all paths, averaged over all frames
 
 
 def feff_average(params, k, scattering_paths, cluster_map, njobs=1):
@@ -1383,7 +1291,7 @@ def R_factor(calc_data, exp_data):
     return R
 
 
-def opt_func(params, exp_data, k, feff_func=feff_average_paths_equal, loss=R_factor, **kwargs):
+def opt_func(params, exp_data, k, feff_func=feff_average, loss=R_factor, **kwargs):
     '''
     Function to optimize for the best fit of the average k2chi
     
@@ -1591,119 +1499,6 @@ def plot_path_graph(G):
     plt.show()
 
 
-def get_paths_and_clusters(path_files):
-    '''
-    Function to read in paths from the FEFF calculation and determine isomorph groups and clusters.
-    This function reads the paths.dat files, creates graphs for each scattering path, determines isomorph groups,
-    and clusters the paths based on their edge weights and node attributes.
-
-    Parameters
-    ----------
-    path_files : list of str
-        List of paths.dat files to read in. Each file corresponds to a frame of the FEFF calculation.
-        Each file should be named in the format 'frameXXXX/paths.dat', where XXXX is the frame index.
-
-    Returns
-    -------
-    paths : list of ScatteringPath objects
-        List of ScatteringPath objects, each representing a scattering path with its associated graph.
-    cluster_map : dict
-        Dictionary mapping each cluster to a parameter index. This is used to determine which parameters
-        to apply to each path.
-    '''
-
-    # read in paths and create graphs for each scattering path
-    paths = []
-    for path in path_files:
-        graphs = parse_paths(path)
-        frame = int(re.search(r'frame(\d+)', path).group(1))  # extract frame index from filename
-        for g in graphs: # loop over each path in the paths.dat file
-            mypath = ScatteringPath(frame_idx=frame, path_idx=g.graph['path_index'])
-            mypath.graph = g  # attach the graph to the ScatteringPath object
-            paths.append(mypath)
-
-    # determine isomorph groups of graphs
-    # Use NetworkX's isomorphism module to find isomorphic graphs
-    # Create a node matcher that matches nodes based on their 'label' attribute, aka atom identity
-    atom_matcher = iso.categorical_node_match('label', 'unknown')
-    isomorph_groups = []
-
-    for path in paths:
-        g = path.graph  # get the graph from the ScatteringPath object
-        found_group = False
-        for idx,group in enumerate(isomorph_groups):
-            # Compare with the first graph in the group (representative)
-            if iso.is_isomorphic(g, group[0], node_match=atom_matcher):
-                group.append(g)
-                path.isomorph_group = idx  # assign the isomorph group index
-                found_group = True
-                break
-        if not found_group:
-            isomorph_groups.append([g])
-            path.isomorph_group = len(isomorph_groups) - 1  # assign the new group index
-
-    # Now we have isomorph groups, we can create a DataFrame for each group
-    # Each DataFrame contains edge weights and node attributes
-    group_dataframes = []
-    group_paths = []  # Keep track of ScatteringPath objects for each group
-
-    for group in isomorph_groups:   
-        rows = []
-        paths_in_group = []
-        for g in group:
-            row = {}
-            # Edge weights
-            for i, (u, v, d) in enumerate(g.edges(data=True)):
-                row[f'edge{i}'] = d.get('weight', None)
-            # Node eta and beta
-            for i, (n, d) in enumerate(g.nodes(data=True)):
-                # row[f'eta{i}'] = d.get('eta', None) # ignore eta for now
-                row[f'beta{i}'] = d.get('beta', None)
-        
-            rows.append(row)
-            # Find the ScatteringPath object corresponding to this graph
-            for p in paths:
-                if p.graph is g:
-                    paths_in_group.append(p)
-                    break
-
-        df = pd.DataFrame(rows)
-        group_dataframes.append(df)
-        group_paths.append(paths_in_group)
-
-    # cluster the paths based on the edge and node attributes
-    # these clusters will be the distinct paths for optimization
-    n_clusters = 0
-    for idx, df in enumerate(group_dataframes):
-        paths_in_group = group_paths[idx]
-        if len(df) > 5:
-            # Scale the data
-            scaler = StandardScaler()
-            df_scaled = scaler.fit_transform(df)
-            
-            # Run HDBSCAN
-            cluster = HDBSCAN()
-            labels = cluster.fit_predict(df_scaled)
-            n_clusters += len(set(labels))
-
-            # assign cluster labels to the ScatteringPath objects
-            for path_obj, label in zip(paths_in_group, labels):
-                path_obj.cluster = int(label)
-
-        else: # if there are not enough paths, assign them all to one cluster
-            for path_obj in paths_in_group:
-                path_obj.cluster = 0
-            n_clusters += 1
-
-    print(f"Total number of clusters: {n_clusters}")
-
-    # Create a map from each unique cluster_key to a unique index
-    cluster_keys = set(p.cluster_key for p in paths)
-    cluster_map = {key: idx for idx, key in enumerate(sorted(cluster_keys))}
-
-    return paths, cluster_map
-
-
 class ScatteringPath:
     '''
     Class to represent a scattering path from the FEFF calculation.
@@ -1738,11 +1533,6 @@ class ScatteringPath:
         '''
         plot_path_graph(self.graph)
 
-
-    # @property
-    # def cluster_key(self):
-    #     '''Unique key for the cluster parameters'''
-    #     return (self.isomorph_group, self.cluster)
 
 @extract_from_tar
 def read_files(filename):

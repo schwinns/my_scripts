@@ -1177,15 +1177,9 @@ def _feff_per_path(idx, filenames, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
 
         # If we are using a tar archive, we need to create a temporary feff path file
         if is_tar:
-            rng = np.random.default_rng()
-            i = rng.integers(0, 1e6)
-
+            tmp_dir = tempfile.mkdtemp(prefix=".tmp_path")
             frame = [part for part in filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
             with tarfile.open(archive_path, 'r:*') as tar:
-                while os.path.exists(f'./.tmp_path{i}'):
-                    i = rng.integers(0, 1e6)
-
-                tmp_dir = f'./.tmp_path{i}'
                 files = tar.getnames()
                 if os.path.join(frame, internal_path) in files: # in case the tarfile has frame/internal_path
                     filepath = os.path.join(frame, internal_path)

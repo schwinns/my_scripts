@@ -1367,6 +1367,7 @@ class EarlyStopper:
         self.counter = 0
         self.verbose = verbose
         self.iteration = 1
+        self.checkpoint = './.checkpoint.pkl'  # file to save the checkpoint
 
     def __call__(self, intermediate_result):
         if self.verbose == 1:
@@ -1379,7 +1380,7 @@ class EarlyStopper:
 
         # Save a checkpoint with the current best parameters and intermediate result object
         np.savetxt('./.params.txt', intermediate_result.x, fmt='%.8f')
-        with open(f'./checkpoint.pl', 'wb') as output:
+        with open(self.checkpoint, 'wb') as output:
             pickle.dump(intermediate_result, output, pickle.HIGHEST_PROTOCOL)
 
         # Check if the current result is better than the best observed

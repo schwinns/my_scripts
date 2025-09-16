@@ -45,6 +45,7 @@ import multiprocessing
 from multiprocessing import Pool
 from functools import partial
 
+import traceback
 import warnings
 warnings.simplefilter("ignore", SyntaxWarning)
 
@@ -800,12 +801,11 @@ class Averager:
         self.paths = []  # list of ScatteringPath objects
         self.n_frames = 0  # number of frames
         for fd in frame_dir:
-            for frame in frames:
+            for frame in tqdm(frames):
                 frame_path = os.path.join(fd, f'frame{frame:04d}.tar.gz')
                 if not os.path.exists(frame_path):
                     if os.path.exists(frame_path[:-7]): # check for non-archive directory
                         raise FileNotFoundError(f"Frame directory {frame_path} is not compressed.")
-                        compress_directory(frame_path[:-7], frame_path, compression='gz')
                     else:
                         raise FileNotFoundError(f"Frame directory {frame_path} does not exist.")
 
@@ -815,10 +815,10 @@ class Averager:
                     df['frame'] = frame  # add a frame column for reference
                     df['path_index'] = df['file'].str.extract(r'feff(\d+)').astype(int) # faster than apply with regex
 
-                    self._graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
+                    graphs = self._graphs_from_paths_dat(os.path.join(frame_path, 'paths.dat')) # get graphs for all scattering paths
                     file_map = dict(zip(df['path_index'], df['file'])) # faster than DataFrame lookup
                     mypaths = []
-                    for g in self._graphs:
+                    for g in graphs:
                         file = file_map.get(g.graph["path_index"])
                         if file:
                             mypaths.append(ScatteringPath(path_index=g.graph["path_index"], filename=file, graph=g))
@@ -863,7 +863,7 @@ class Averager:
         return len(self.paths)
     
 
-    def average(self, k, paths=None, njobs=None, chunk_size=None):
+    def average(self, k, paths=None, njobs=None):
         '''
         Calculate the average k^2*chi(k) from multiple FEFF path files.
 
@@ -876,9 +876,7 @@ class Averager:
         njobs : int, optional
             Number of parallel jobs to run. Default is None, which uses the `njobs` attribute. If this is specified, it overrides
             the class attribute.
-        chunk_size : int, optional
-            Number of paths to process in each chunk for better load balancing. Default is None, which uses adaptive sizing.
-        
+
         Returns
         -------
         k2chi_avg : np.ndarray
@@ -891,10 +889,6 @@ class Averager:
 
         if njobs is not None:
             self.njobs = njobs
-        
-        if chunk_size is None:
-            # Adaptive chunk size: balance between overhead and load balancing
-            chunk_size = max(1, len(paths) // (self.njobs * 4))
 
         filenames = [p.filename for p in paths]
         run_per_path = partial(_feff_per_path, filenames=filenames, k=k, deltar=self.deltar, e0=self.e0, sigma2=self.sigma2, s02=self.s02)
@@ -902,10 +896,10 @@ class Averager:
         if self.njobs > 1:
             with Pool(self.njobs) as worker_pool:
                 if self.progress_bar:
-                    results = list(tqdm(worker_pool.imap(run_per_path, range(len(paths)), chunksize=chunk_size),
+                    results = list(tqdm(worker_pool.imap(run_per_path, range(len(paths))),
                                     total=len(paths), desc='Processing paths'))
                 else:
-                    results = worker_pool.map(run_per_path, range(len(paths)), chunksize=chunk_size)
+                    results = worker_pool.map(run_per_path, range(len(paths)))
         else:
             # Single-threaded execution
             results = []
@@ -1148,61 +1142,66 @@ def _feff_per_path(idx, filenames, k, deltar=0.0, e0=0.0, sigma2=0.0, s02=1.0):
         Calculated k^2*chi(k) for the given FEFF path.
     
     '''
-    filename = filenames[idx]
-    file_pattern = filename.split('.dat')[0]
-    perform_calc = True  # flag to determine if we need to perform the calculation
 
-    # check if the file pattern contains a tar archive
-    is_tar = False
-    parts = filename.split(os.sep)
-    for i, part in enumerate(parts):
-        if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
-            archive_path = os.sep.join(parts[:i + 1])
-            internal_path = os.sep.join(parts[i + 1:])
-            is_tar = True
-            break
+    try:
+        filename = filenames[idx]
+        file_pattern = filename.split('.dat')[0]
+        perform_calc = True  # flag to determine if we need to perform the calculation
 
-    # read in the text file if it has already been calculated
-    chi_file = file_pattern + '_chi.dat'
-    if check_file_in_tar_path(chi_file):
+        # check if the file pattern contains a tar archive
+        is_tar = False
+        parts = filename.split(os.sep)
+        for i, part in enumerate(parts):
+            if part.endswith(('.tar.gz', '.tgz', '.tar', '.tar.bz2')):
+                archive_path = os.sep.join(parts[:i + 1])
+                internal_path = os.sep.join(parts[i + 1:])
+                is_tar = True
+                break
 
-        data = load_path(chi_file)
+        # read in the text file if it has already been calculated
+        chi_file = file_pattern + '_chi.dat'
+        if check_file_in_tar_path(chi_file):
+            data = load_path(chi_file)
+            if data[:,0].shape == k.shape: # check if the k values match
+                perform_calc = False
+                k2chi = data[:, 2]
+                return k2chi
 
-        if data[:,0].shape == k.shape: # check if the k values match
-            perform_calc = False
-            k2chi = data[:, 2]
-            return k2chi
+        if perform_calc:
 
-    if perform_calc:
+            # If we are using a tar archive, we need to create a temporary feff path file
+            if is_tar:
+                tmp_dir = tempfile.mkdtemp(prefix=".tmp_path")
+                frame = [part for part in filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
+                with tarfile.open(archive_path, 'r:*') as tar:
+                    files = tar.getnames()
+                    if os.path.join(frame, internal_path) in files: # in case the tarfile has frame/internal_path
+                        filepath = os.path.join(frame, internal_path)
+                    elif os.path.join(internal_path) in files:
+                        filepath = internal_path
+                    else:
+                        raise FileNotFoundError(f'File {internal_path} not found in tar archive {archive_path}')
 
-        # If we are using a tar archive, we need to create a temporary feff path file
-        if is_tar:
-            tmp_dir = tempfile.mkdtemp(prefix=".tmp_path")
-            frame = [part for part in filename.split(os.sep) if part.startswith('frame')][0].strip('tar.gz')
-            with tarfile.open(archive_path, 'r:*') as tar:
-                files = tar.getnames()
-                if os.path.join(frame, internal_path) in files: # in case the tarfile has frame/internal_path
-                    filepath = os.path.join(frame, internal_path)
-                elif os.path.join(internal_path) in files:
-                    filepath = internal_path
-                else:
-                    raise FileNotFoundError(f'File {internal_path} not found in tar archive {archive_path}')
+                    tar.extract(filepath, path=tmp_dir)
 
-                tar.extract(filepath, path=tmp_dir)
+                filepath = os.path.join(tmp_dir, filepath)
 
-            filepath = os.path.join(tmp_dir, filepath)
+            else:
+                filepath = filename
 
-        else:
-            filepath = filename
+            p = xafs.feffpath(filepath, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
+            xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
+            k2chi = p.chi * p.k**2  # k^2 * chi(k)
+            
+            if is_tar:
+                shutil.rmtree(tmp_dir)
 
-        p = xafs.feffpath(filepath, deltar=deltar, e0=e0, sigma2=sigma2, s02=s02)
-        xafs.path2chi(p, k=k) # calculate chi(k) for the path at the same points as experimental data
-        k2chi = p.chi * p.k**2  # k^2 * chi(k)
-        
-        if is_tar:
-            shutil.rmtree(tmp_dir)
+        return k2chi
 
-    return k2chi
+    except Exception as e:
+        print(f"Error in frame {filenames[idx]}:")
+        traceback.print_exc()
+        raise
 
 
 def feff_average(params, k, scattering_paths, cluster_map, njobs=1):

@@ -255,14 +255,23 @@ class GromacsTopology:
 
         # read included files and add to self.cleaned
         incl_idx = [i for i,line in enumerate(self.cleaned) if line.startswith('#include')]
+        incl_files = []
         for idx in incl_idx:
-            incl_file = self.cleaned[idx].split('"')[1]
-            cleaned_top = self.cleaned[:idx]
-            cleaned_bott = self.cleaned[idx+1:]
+            line = self.cleaned[idx]
+            incl_file = line.split()[1].strip('"')
             incl = open(incl_file, 'r').readlines()
             tmp = [line for line in incl if not line.startswith(';')]
             incl_clean = [line for line in tmp if not len(line.split()) == 0]
-            self.cleaned = cleaned_top + incl_clean + cleaned_bott
+            incl_files.append(incl_clean)
+
+        print(f'WARNING: Assumes #include statements are on consecutive lines with indices: {incl_idx}. If these indices are not consecutive, please adjust GromacsTopology.init().')
+        cleaned = self.cleaned[:incl_idx[0]]
+
+        for i in range(len(incl_idx)):
+            cleaned += incl_files[i]
+
+        cleaned += self.cleaned[incl_idx[-1]+1:]
+        self.cleaned = cleaned
 
         # initialize some objects to store data
         self.n_atoms = 0
@@ -274,12 +283,12 @@ class GromacsTopology:
 
         # read in directives
         self.read_defaults()
-        self.read_atomtypes()
+        atomtypes_end_idx = self.read_atomtypes()
         self.read_molecules()
     
         # read in each molecule
         for mol in self.molecules:
-            idx = [i for i,line in enumerate(self.cleaned) if line.startswith(mol.name)][0]
+            idx = [i+atomtypes_end_idx for i,line in enumerate(self.cleaned[atomtypes_end_idx:]) if line.startswith(mol.name)][0]
             self.read_moleculetype(mol, idx)
 
         # convert lists into numpy arrays to access with indices
@@ -472,8 +481,9 @@ class GromacsTopology:
         idx = self.cleaned.index('[ atomtypes ]\n')
     
         self.atomtypes = {}
-        for line in self.cleaned[idx+1:]:
+        for i,line in enumerate(self.cleaned[idx+1:]):
             if line.startswith('['):
+                atomtypes_end_idx = i
                 break
             else:
                 atype = AtomType(line)
@@ -481,6 +491,8 @@ class GromacsTopology:
 
         if self.verbose:
             print(f'{len(self.atomtypes)} atom types in the topology')
+
+        return atomtypes_end_idx
 
 
     def read_molecules(self):
@@ -511,26 +523,31 @@ class GromacsTopology:
         # get indices of directives
         dir_idx = [i for i,line in enumerate(my_lines) if line.startswith('[ ')]
         dir_idx.append(len(my_lines)-1)
+        
+        # WARNING: hard-coding for ions, whihc only have [ atoms ] directive
+        if len(dir_idx) == 2 and my_lines[dir_idx[0]].startswith('[ atoms ]'):
+            self._parse_atoms(molecule, [my_lines[dir_idx[1]]])
 
-        # add directives to molecule
-        for i,d in enumerate(dir_idx):
-            if my_lines[d].startswith('[ atoms ]'):
-                self._parse_atoms(molecule, my_lines[d+1:dir_idx[i+1]])
-            elif my_lines[d].startswith('[ bonds ]'):
-                self._parse_bonds(molecule, my_lines[d+1:dir_idx[i+1]])
-            elif my_lines[d].startswith('[ settles ]'):
-                self._parse_settles(molecule, my_lines[d+1:dir_idx[i+1]])
-            elif my_lines[d].startswith('[ angles ]'):
-                self._parse_angles(molecule, my_lines[d+1:dir_idx[i+1]])
-            elif my_lines[d].startswith('[ dihedrals ]'):
-                self._parse_dihedrals(molecule, my_lines[d+1:dir_idx[i+1]])
-            elif my_lines[d].startswith('[ exclusions ]'):
-                self._parse_exclusions(molecule, my_lines[d+1:dir_idx[i+1]])
-            elif my_lines[d].startswith('[ system ]'):
-                self._parse_system(my_lines[d+1:dir_idx[i+1]+1])
-            elif '[' in my_lines[d]:
-                dir_type = my_lines[d].split('[ ')[1].split(' ]')[0]
-                raise TypeError(f'Cannot parse directive type [ {dir_type} ]')
+        else:
+            # add directives to molecule
+            for i,d in enumerate(dir_idx):
+                if my_lines[d].startswith('[ atoms ]'):
+                    self._parse_atoms(molecule, my_lines[d+1:dir_idx[i+1]])
+                elif my_lines[d].startswith('[ bonds ]'):
+                    self._parse_bonds(molecule, my_lines[d+1:dir_idx[i+1]])
+                elif my_lines[d].startswith('[ settles ]'):
+                    self._parse_settles(molecule, my_lines[d+1:dir_idx[i+1]])
+                elif my_lines[d].startswith('[ angles ]'):
+                    self._parse_angles(molecule, my_lines[d+1:dir_idx[i+1]])
+                elif my_lines[d].startswith('[ dihedrals ]'):
+                    self._parse_dihedrals(molecule, my_lines[d+1:dir_idx[i+1]])
+                elif my_lines[d].startswith('[ exclusions ]'):
+                    self._parse_exclusions(molecule, my_lines[d+1:dir_idx[i+1]])
+                elif my_lines[d].startswith('[ system ]'):
+                    self._parse_system(my_lines[d+1:dir_idx[i+1]+1])
+                elif '[' in my_lines[d]:
+                    dir_type = my_lines[d].split('[ ')[1].split(' ]')[0]
+                    raise TypeError(f'Cannot parse directive type [ {dir_type} ]')
 
 
     def write(self, filename):

@@ -35,6 +35,7 @@ from six.moves import range, zip
 import inspect
 import logging
 import itertools
+from typing import Union
 import warnings
 
 import numpy as np
@@ -125,9 +126,77 @@ class ParallelAnalysisBase(object):
         self._trajectory = trajectory
         self._verbose = verbose
 
-    def _setup_frames(self, trajectory, start=None, stop=None, step=None):
+    def _define_run_frames(
+        self, trajectory, start=None, stop=None, step=None, frames=None
+    ) -> Union[slice, np.ndarray]:
+        """Defines limits for the whole run, as passed by self.run() arguments
+
+        Parameters
+        ----------
+        trajectory : mda.Reader
+            a trajectory Reader
+        start : int, optional
+            start frame of analysis, by default None
+        stop : int, optional
+            stop frame of analysis, by default None
+        step : int, optional
+            number of frames to skip between each analysed frame, by default None
+        frames : array_like, optional
+            array of integers or booleans to slice trajectory; cannot be
+            combined with ``start``, ``stop``, ``step``; by default None
+
+        Returns
+        -------
+        Union[slice, np.ndarray]
+            Appropriate slicer for the trajectory that would give correct iteraction
+            order via trajectory[slicer]
+
+        Raises
+        ------
+        ValueError
+            if *both* `frames` and at least one of ``start``, ``stop``, or ``step``
+            is provided (i.e. set to not ``None`` value).
+
+
+        .. versionadded:: 2.8.0
         """
-        Pass a Reader object and define the desired iteration pattern
+        self._trajectory = trajectory
+        if frames is not None:
+            if not all(opt is None for opt in [start, stop, step]):
+                raise ValueError(
+                    "start/stop/step cannot be combined with frames"
+                )
+            slicer = frames
+        else:
+            start, stop, step = trajectory.check_slice_indices(
+                start, stop, step
+            )
+            slicer = slice(start, stop, step)
+        self.start, self.stop, self.step = start, stop, step
+        return slicer
+
+    def _prepare_sliced_trajectory(self, slicer: Union[slice, np.ndarray]):
+        """Prepares sliced trajectory for use in subsequent parallel computations:
+        namely, assigns self._sliced_trajectory and its appropriate attributes,
+        self.n_frames, self.frames and self.times.
+
+        Parameters
+        ----------
+        slicer : Union[slice, np.ndarray]
+            appropriate slicer for the trajectory
+
+
+        .. versionadded:: 2.8.0
+        """
+        self._sliced_trajectory = self._trajectory[slicer]
+        self.n_frames = len(self._sliced_trajectory)
+        self.frames = np.zeros(self.n_frames, dtype=int)
+        self.times = np.zeros(self.n_frames)
+
+    def _setup_frames(
+        self, trajectory, start=None, stop=None, step=None, frames=None
+    ):
+        """Pass a Reader object and define the desired iteration pattern
         through the trajectory
 
         Parameters
@@ -140,20 +209,37 @@ class ParallelAnalysisBase(object):
             stop frame of analysis
         step : int, optional
             number of frames to skip between each analysed frame
+        frames : array_like, optional
+            array of integers or booleans to slice trajectory; cannot be
+            combined with ``start``, ``stop``, ``step``
+
+            .. versionadded:: 2.2.0
+
+        Raises
+        ------
+        ValueError
+            if *both* `frames` and at least one of ``start``, ``stop``, or
+            ``frames`` is provided (i.e., set to another value than ``None``)
 
 
         .. versionchanged:: 1.0.0
             Added .frames and .times arrays as attributes
 
+        .. versionchanged:: 2.2.0
+            Added ability to iterate through trajectory by passing a list of
+            frame indices in the `frames` keyword argument
+
+        .. versionchanged:: 2.8.0
+            Split function into two: :meth:`_define_run_frames` and
+            :meth:`_prepare_sliced_trajectory`: first one defines the limits
+            for the whole run and is executed once during :meth:`run` in
+            :meth:`_setup_frames`, second one prepares sliced trajectory for
+            each of the workers and gets executed twice: one time in
+            :meth:`_setup_frames` for the whole trajectory, second time in
+            :meth:`_compute` for each of the computation groups.
         """
-        self._trajectory = trajectory
-        start, stop, step = trajectory.check_slice_indices(start, stop, step)
-        self.start = start
-        self.stop = stop
-        self.step = step
-        self.n_frames = len(range(start, stop, step))
-        self.frames = np.zeros(self.n_frames, dtype=int)
-        self.times = np.zeros(self.n_frames)
+        slicer = self._define_run_frames(trajectory, start, stop, step, frames)
+        self._prepare_sliced_trajectory(slicer)
 
     def _single_frame(self, frame_idx):
         """Calculate data from a single frame of trajectory
@@ -173,7 +259,7 @@ class ParallelAnalysisBase(object):
         """
         pass  # pylint: disable=unnecessary-pass
 
-    def run(self, start=None, stop=None, step=None, verbose=None, njobs=-1):
+    def run(self, start=None, stop=None, step=None, frames=None, verbose=None, njobs=-1):
         """Perform the calculation
 
         Parameters
@@ -186,6 +272,9 @@ class ParallelAnalysisBase(object):
             number of frames to skip between each analysed frame
         verbose : bool, optional
             Turn on verbosity
+        frames : array_like, optional
+            array of integers or booleans to slice trajectory; cannot be
+            combined with ``start``, ``stop``, ``step`
         njobs : int, optional
             number of cores to use for parallelization, default=-1 means all available
         """
@@ -194,7 +283,7 @@ class ParallelAnalysisBase(object):
         verbose = getattr(self, '_verbose',
                           False) if verbose is None else verbose
 
-        self._setup_frames(self._trajectory, start, stop, step)
+        self._setup_frames(self._trajectory, start, stop, step, frames)
         logger.info("Starting preparation")
         self._prepare()
 
@@ -218,7 +307,7 @@ class ParallelAnalysisBase(object):
             else:
                 n = njobs
 
-            print(f'Running with {n} CPUs')
+            logger.info(f'Running with {n} CPUs')
             frame_values = np.arange(len(self._trajectory[self.start:self.stop:self.step]))
 
             with Pool(n) as worker_pool:
@@ -277,6 +366,17 @@ class ParallelInterRDF(ParallelAnalysisBase):
     within the same molecule.  For example, if there are 7 of each
     atom in each molecule, the exclusion mask `(7, 7)` can be used.
 
+    The attribute :attr:`rdf_settings` contains the settings used for the
+    calculation, such as the number of bins and the range. This can be modified
+    to pass more options to the histogram function, such as weights.
+
+    If passing weights, the `weights` should be an array, list, or a callable
+    function that returns an array of weights for each pair of atoms (as determined, for 
+    instance, by `mdanalysis.lib.distances.capped_distances`). For example, to weight by charge::
+
+      weights = lambda pairs : [g1[a1].charge*g2[a2].charge for a1,a2 in pairs]
+      rdf.rdf_settings['weights'] = weights
+
 
     .. versionadded:: 0.13.0
 
@@ -295,11 +395,19 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
         self.rdf_settings = {'bins': nbins,
                              'range': range}
+        
+        # Set the max range to filter the search radius
+        self._maxrange = self.rdf_settings['range'][1]
+        
         self._exclusion_block = exclusion_block
 
     def _prepare(self):
         # Empty histogram to store the RDF
-        count, edges = np.histogram([-1], **self.rdf_settings)
+        rdf_settings_copy = self.rdf_settings.copy()
+        if 'weights' in rdf_settings_copy:
+            del rdf_settings_copy['weights']
+
+        count, edges = np.histogram([-1]*self.n_pairs, **rdf_settings_copy)
         count = count.astype(np.float64)
         count *= 0.0
         self.count = count
@@ -308,8 +416,6 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
         # Need to know average volume
         self.volume = 0.0
-        # Set the max range to filter the search radius
-        self._maxrange = self.rdf_settings['range'][1]
 
         # create a Results object to hold the results
         self.results = Results()
@@ -330,8 +436,22 @@ class ParallelInterRDF(ParallelAnalysisBase):
             mask = np.where(idxA != idxB)[0]
             dist = dist[mask]
 
+        # check for weights
+        rdf_settings_copy = self.rdf_settings.copy()
+        if 'weights' in self.rdf_settings:
+            if isinstance(self.rdf_settings['weights'], (np.ndarray, list)):
+                weights = self.rdf_settings['weights']
+            elif callable(self.rdf_settings['weights']):
+                weights = self.rdf_settings['weights'](pairs)
+            else:
+                raise TypeError("weights must be an array, list, or callable function")
+            
+            del rdf_settings_copy['weights']
 
-        count = np.histogram(dist, **self.rdf_settings)[0]
+        else:
+            weights = None
+
+        count = np.histogram(dist, weights=weights, **rdf_settings_copy)[0]
 
         return count, self._ts.volume # return, rather than accumulate
 
@@ -341,10 +461,17 @@ class ParallelInterRDF(ParallelAnalysisBase):
             self.count += res[0]
             self.volume += res[1]
 
-        # Number of each selection
+        # Number of each selection, if weights then weight the number
         nA = len(self.g1)
         nB = len(self.g2)
         N = nA * nB
+
+        if 'weights' in self.rdf_settings:
+            if isinstance(self.rdf_settings['weights'], (np.ndarray, list)):
+                N = sum(self.rdf_settings['weights'])
+            elif callable(self.rdf_settings['weights']):
+                pairs = itertools.product(range(nA), range(nB))
+                N = sum(self.rdf_settings['weights'](pairs))
 
         # If we had exclusions, take these into account
         if self._exclusion_block:
@@ -356,7 +483,7 @@ class ParallelInterRDF(ParallelAnalysisBase):
         vol = np.power(self.edges[1:], 3) - np.power(self.edges[:-1], 3)
         vol *= 4/3.0 * np.pi
 
-        # Average number density
+        # Average density
         box_vol = self.volume / self.n_frames
         density = N / box_vol
 
@@ -364,3 +491,75 @@ class ParallelInterRDF(ParallelAnalysisBase):
 
         self.rdf = rdf
         self.results.rdf = rdf
+
+    @property
+    def n_pairs(self):
+        """Return the number of pairs up to max_range"""
+        pairs = distances.capped_distance(self.g1.positions,
+                                          self.g2.positions,
+                                          self._maxrange,
+                                          box=self.u.dimensions,
+                                          return_distances=False)
+
+        return len(pairs)
+
+
+class ParallelCoordinationNumbers(ParallelAnalysisBase):
+    r"""Calculate the time-series of coordination numbers between two groups of atoms.
+
+    Arguments
+    ---------
+    g1 : AtomGroup
+      First AtomGroup
+    g2 : AtomGroup
+      Second AtomGroup
+    cutoff : float
+      Cutoff distance for coordination number calculation, default is 3.5 Angstroms.
+    exclusion_block : tuple (optional)
+          A tuple representing the tile to exclude from the distance
+          array. [None]
+
+    """
+    def __init__(self, g1, g2,
+                 cutoff=3.5, exclusion_block=None,
+                 **kwargs):
+        super(ParallelCoordinationNumbers, self).__init__(g1.universe.trajectory, **kwargs)
+        self.g1 = g1
+        self.g2 = g2
+        self.u = g1.universe
+
+        self.cn_settings = {'cutoff': cutoff}
+        self._exclusion_block = exclusion_block
+
+    def _prepare(self):
+        
+        # create a Results object to hold the results
+        self.results = Results()
+        self.results.cn = np.zeros((len(self.u.trajectory), len(self.g1)))
+
+
+    def _single_frame(self, frame_idx):
+        self._frame_index = frame_idx
+        self._ts = self.u.trajectory[frame_idx]
+
+        pairs, dist = distances.capped_distance(self.g1.positions,
+                                                self.g2.positions,
+                                                self.cn_settings['cutoff'], # calculates the pairs that are within the cutoff
+                                                box=self.u.dimensions)
+        # Maybe exclude same molecule distances
+        if self._exclusion_block is not None:
+            idxA, idxB = pairs[:, 0]//self._exclusion_block[0], pairs[:, 1]//self._exclusion_block[1]
+            mask = np.where(idxA != idxB)[0]
+            dist = dist[mask]
+
+        cn = np.zeros(len(self.g1))
+        for i in range(len(self.g1)):
+            cn[i] = (pairs[:, 0] == i).sum()
+
+        return cn
+
+    def _conclude(self):
+        # gather the results from all processes and sum
+        res = np.array(self._result)
+
+        self.results.cn = res

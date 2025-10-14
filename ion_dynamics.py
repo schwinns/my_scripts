@@ -493,7 +493,7 @@ class IonDynamics:
         return k_entry / k_exit
 
 
-    def coordination_environment(self, ions, show_cutoffs=False, cation_radius=3.15): 
+    def coordination_environment(self, ions, show_cutoffs=False, radii={}, cation_radius=3.15): 
         '''
         Get the coordination environment of a given ion. Uses SolvationAnalysis to estimate the coordination shells
         and to speciate all the different groups. Saves the solvation_analysis.Solute object to `self.solute`.
@@ -506,6 +506,9 @@ class IonDynamics:
             Ions to calculate the coordination environment for
         show_cutoffs : bool, optional
             Whether to show the cutoffs for the different groups. Default = False
+        radii : dict, optional
+            Dictionary with the radii for the different groups. The keys should be the group names and the values
+            should be the corresponding radii in Angstroms.
         cation_radius : float, optional
             Radius to determine cation-cation coordination. This will likely never happen, but it is here for completeness.
             Default = 3.15 Angstroms is the Na-water minimum in the RDF.
@@ -533,6 +536,9 @@ class IonDynamics:
         anions = self.universe.select_atoms(f'resname CL')
         waters = self.waters.select_atoms(f'type OW')
 
+        if 'cations' not in radii:
+            radii['cations'] = cation_radius
+
         self.solute = Solute.from_atoms(ions,
                                 {
                                     'amide_o' : amide_o,
@@ -543,7 +549,7 @@ class IonDynamics:
                                     'cations' : cations,
                                     'waters' : waters
                                 }, solute_name='Ion',
-                                radii = {'cations' : cation_radius})
+                                radii = radii)
 
         self.solute.run()
 

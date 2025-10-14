@@ -416,6 +416,18 @@ class PolymAnalysis():
                 t += 1
 
 
+    def create_polymer_graphs(self):
+        '''Create a graph representation of the polymer network'''
+
+        self.polymer_graphs = []
+
+        for res in self.polymer.residues:
+            g = build_graph_from_atoms(res.atoms)
+            self.polymer_graphs.append(g)
+
+        return self.polymer_graphs
+
+
     def pack_water_reservoirs(self, output='prehydrate.data', water_file='water.data', box_frac=0.5, seed=12345):
         '''Pack two water reservoirs on either side of the PA slab'''
 
@@ -1629,6 +1641,15 @@ class PolymAnalysis():
                 water_kwargs['cut'] = 0
 
             coords = pd.DataFrame(water.positions, columns=['x', 'y', 'z'])
+            wrapped_z_below = coords['z'] - (self.box[1,2] - self.box[0,2])
+            wrapped_z_above = coords['z'] + (self.box[1,2] - self.box[0,2])
+            wrapped_coords_below = coords.copy()
+            wrapped_coords_below['z'] = wrapped_z_below
+            wrapped_coords_above = coords.copy()
+            wrapped_coords_above['z'] = wrapped_z_above
+
+            coords = pd.concat([coords, wrapped_coords_below, wrapped_coords_above], ignore_index=True)
+    
             # plot the water with a kernel density estimate
             sns.kdeplot(coords, x='z', y=ydim, cmap='Blues', ax=ax, **water_kwargs)
             
@@ -1732,6 +1753,45 @@ class PolymAnalysis():
 class Settings:
     def __init__(self):
         pass
+
+
+# CPK color scheme
+cpk_colors = {
+    'H': '#FFFFFF', 'C': '#000000', 'N': '#3050F8', 'O': '#FF0D0D',
+    'F': '#90E050', 'P': '#FF8000', 'S': '#FFFF30', 'Cl': '#1FF01F',
+    'Br': '#A62929', 'I': '#940094', 'Na': '#AB5CF2', 'Mg': '#8AFF00',
+    'Ca': '#3DFF00', 'Fe': '#E06633', 'Zn': '#7D80B0'
+}
+
+def build_graph_from_atoms(atom_group : mda.core.groups.AtomGroup, color_scheme : dict = cpk_colors) -> nx.Graph:
+    '''
+    Build a NetworkX graph from an MDAnalysis AtomGroup. Each atom is a node, and edges are bonds.
+
+    Access the atoms in the graph via G.nodes[index]['atom'], where index is the atom index from the AtomGroup.
+
+    Parameters
+    ----------
+    atom_group: MDAnalysis AtomGroup
+        The group of atoms to build the graph from.
+    color_scheme: dict, optional
+        A dictionary mapping element symbols to colors for visualization. Defaults to CPK color scheme.
+    '''
+
+    G = nx.Graph()
+
+    # add nodes to the graph
+    for atom in atom_group:
+        color = color_scheme.get(atom.element, '#808080')  # Default to gray if element not found
+        G.add_node(atom.index, atom=atom, color=color, element=atom.element)
+
+    # add edges to the graph, weights are the distances between atoms
+    for bond in atom_group.bonds:
+        atom1 = bond.atoms[0]
+        atom2 = bond.atoms[1]
+        distance = distances.distance_array(atom1.position, atom2.position)[0, 0]
+        G.add_edge(atom1.index, atom2.index, weight=distance)
+    
+    return G
 
 
 if __name__ == '__main__':

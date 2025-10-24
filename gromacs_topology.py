@@ -255,23 +255,25 @@ class GromacsTopology:
 
         # read included files and add to self.cleaned
         incl_idx = [i for i,line in enumerate(self.cleaned) if line.startswith('#include')]
-        incl_files = []
-        for idx in incl_idx:
-            line = self.cleaned[idx]
-            incl_file = line.split()[1].strip('"')
-            incl = open(incl_file, 'r').readlines()
-            tmp = [line for line in incl if not line.startswith(';')]
-            incl_clean = [line for line in tmp if not len(line.split()) == 0]
-            incl_files.append(incl_clean)
 
-        print(f'WARNING: Assumes #include statements are on consecutive lines with indices: {incl_idx}. If these indices are not consecutive, please adjust GromacsTopology.init().')
-        cleaned = self.cleaned[:incl_idx[0]]
+        if len(incl_idx) > 0:
+            incl_files = []
+            for idx in incl_idx:
+                line = self.cleaned[idx]
+                incl_file = line.split()[1].strip('"')
+                incl = open(incl_file, 'r').readlines()
+                tmp = [line for line in incl if not line.startswith(';')]
+                incl_clean = [line for line in tmp if not len(line.split()) == 0]
+                incl_files.append(incl_clean)
 
-        for i in range(len(incl_idx)):
-            cleaned += incl_files[i]
+            print(f'WARNING: Assumes #include statements are on consecutive lines with indices: {incl_idx}. If these indices are not consecutive, please adjust GromacsTopology.init().')
+            cleaned = self.cleaned[:incl_idx[0]]
 
-        cleaned += self.cleaned[incl_idx[-1]+1:]
-        self.cleaned = cleaned
+            for i in range(len(incl_idx)):
+                cleaned += incl_files[i]
+
+            cleaned += self.cleaned[incl_idx[-1]+1:]
+            self.cleaned = cleaned
 
         # initialize some objects to store data
         self.n_atoms = 0
@@ -290,6 +292,11 @@ class GromacsTopology:
         for mol in self.molecules:
             idx = [i+atomtypes_end_idx for i,line in enumerate(self.cleaned[atomtypes_end_idx:]) if line.startswith(mol.name)][0]
             self.read_moleculetype(mol, idx)
+
+        # hard-code reading system directive at end of file
+        if not hasattr(self, 'system'):
+            idx = self.cleaned.index('[ system ]\n')
+            self._parse_system(self.cleaned[idx+1:idx+2])
 
         # convert lists into numpy arrays to access with indices
         self.atoms = np.array(self.atoms)
@@ -524,7 +531,7 @@ class GromacsTopology:
         dir_idx = [i for i,line in enumerate(my_lines) if line.startswith('[ ')]
         dir_idx.append(len(my_lines)-1)
         
-        # WARNING: hard-coding for ions, whihc only have [ atoms ] directive
+        # WARNING: hard-coding for ions, which only have [ atoms ] directive
         if len(dir_idx) == 2 and my_lines[dir_idx[0]].startswith('[ atoms ]'):
             self._parse_atoms(molecule, [my_lines[dir_idx[1]]])
 
@@ -553,42 +560,45 @@ class GromacsTopology:
     def write(self, filename):
         '''Write the (possibly modified) topology'''
 
-        # open output file for writing
-        out = open(filename, 'w')
+        all_lines = []
 
         # write [ defaults ] directive
         directive = ['[ defaults ]\n']
-        directive += f'\t{self.nbfunc}\t{self.comb_rule}\t{self.gen_pairs}\t{self.fudgeLJ}\t{self.fudgeQQ}\n'
-        directive += '\n'
-        out.writelines(directive)
+        directive.append(f'\t{self.nbfunc}\t{self.comb_rule}\t{self.gen_pairs}\t{self.fudgeLJ}\t{self.fudgeQQ}\n')
+        directive.append('\n')
+        all_lines.extend(directive)
 
         # write [ atomtypes ] directive
         directive = ['[ atomtypes ]\n']
         for a in self.atomtypes:
             at = self.atomtypes[a]
-            directive += f'{at.type:4s} {at.bondingtype:4s}\t{at.atomic_number:.0f}\t{at.mass:.8f}\t{at.charge:.8f}\tA\t{at.sigma:.8e}\t{at.epsilon:.8e}\n'
+            directive.append(f'{at.type:4s} {at.bondingtype:4s}\t{at.atomic_number:.0f}\t{at.mass:.8f}\t{at.charge:.8f}\tA\t{at.sigma:.8e}\t{at.epsilon:.8e}\n')
 
-        directive += '\n'
-        out.writelines(directive)
+        directive.append('\n')
+        all_lines.extend(directive)
 
         # loop through all molecules
         for molecule in self.molecules:
 
+            # do not duplicate moleculetype if already written
+            if f'{molecule.name}\t\t{molecule.nex}\n' in all_lines:
+                continue
+
             # write [ moleculetype ] directive
             directives = ['[ moleculetype ]\n']
-            directives += f'{molecule.name}\t\t{molecule.nex}\n'
-            directives += '\n'
+            directives.append(f'{molecule.name}\t\t{molecule.nex}\n')
+            directives.append('\n')
 
             # write [ atoms ] directive
-            directives += '[ atoms ]\n'
+            directives.append('[ atoms ]\n')
             for atom in molecule.atoms:
-                directives += f'{atom.num:7d} {atom.type:4s}\t\t{atom.resnum} {atom.resname:8s} {atom.atomname:9s}\t{atom.cgnr:d}\t{atom.charge:.8f}\t{atom.mass:.8f}\n'
+                directives.append(f'{atom.num:7d} {atom.type:4s}\t\t{atom.resnum} {atom.resname:8s} {atom.atomname:9s}\t{atom.cgnr:d}\t{atom.charge:.8f}\t{atom.mass:.8f}\n')
 
-            directives += '\n'
+            directives.append('\n')
 
             # write other molecule directives
             for directive in molecule.directives:
-                directives += f'[ {directive} ]\n'
+                directives.append(f'[ {directive} ]\n')
                 for mol_obj in getattr(molecule, directive):
                     line = ''
                     for atom in mol_obj.atoms:
@@ -599,22 +609,26 @@ class GromacsTopology:
                         line += f'{param:.8e}\t'
 
                     line += '\n'
-                    directives += line
-                
-                directives += '\n'
-            
-            out.writelines(directives)
+                    directives.append(line)
+
+                directives.append('\n')
+
+            all_lines.extend(directives)
 
         # write [ system ] directive
         directive = ['[ system ]\n']
-        directive += f'{self.system}\n'
-        directive += '\n'
-        out.writelines(directive)
+        directive.append(f'{self.system}\n')
+        directive.append('\n')
+        all_lines.extend(directive)
 
         # write [ molecules ] directive
         directive = ['[ molecules ]\n']
         for molecule in self.molecules:
-            directive += f'{molecule.name}\t{molecule.n_mols}\n'
+            directive.append(f'{molecule.name}\t{molecule.n_mols}\n')
 
-        out.writelines(directive)
+        all_lines.extend(directive)
+
+        with open(filename, 'w') as out:
+            out.writelines(all_lines)
+
         print(f'Finished writing topology to {filename}!')

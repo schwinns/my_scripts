@@ -8,6 +8,8 @@ from matplotlib.ticker import MultipleLocator
 from tqdm import tqdm
 import subprocess
 
+import networkx as nx
+
 import MDAnalysis as mda
 import MDAnalysis.transformations as trans
 

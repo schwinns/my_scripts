@@ -104,6 +104,118 @@ class MPD():
             atom.charge = charge        
 
 
+class MPD_Cl():
+    def __init__(self, N, cl='6', xlink_n='7', ar_c='2', term_n='8', ar_h='3', hn='4'):
+        '''
+        N should be one of the 2 nitrogens on the MPD monomer
+        
+        Positions on MPD ring
+               _1_
+              4    2
+              |    |
+         N2 - 5_  _3 - N1
+                6
+                |
+                Cl
+
+        '''
+
+        # Save input nitrogen and molecule information
+        if N.type == xlink_n: 
+            self.N1 = N # N1 is always crosslinked
+            self.atoms = [self.N1]
+        else:
+            self.N2 = N
+            self.atoms = [self.N2]
+        self.mol = N.residue
+
+        # Define the aromatic carbons by diagram above
+        self.ca3 = [atom for atom in N.bonded_atoms if atom.type == ar_c][0]
+        self.atoms.append(self.ca3)
+        
+        ca26 = [atom for atom in self.ca3.bonded_atoms if atom.type == ar_c]
+        for ca in ca26:
+            ca5 = [atom for atom in ca.bonded_atoms if atom != self.ca3 and (xlink_n in atom.bonded_atoms.types or term_n in atom.bonded_atoms.types)]
+            if len(ca5) > 0:
+                self.ca5 = ca5[0]
+                self.atoms.append(self.ca5)
+                self.ca6 = ca
+                self.atoms.append(self.ca6)
+            else:
+                self.ca1 = [atom for atom in ca.bonded_atoms if atom.type == ar_c and atom != self.ca3][0]
+                self.atoms.append(self.ca1)
+                self.ca2 = ca
+                self.atoms.append(self.ca2)
+
+        self.ca4 = [atom for atom in self.ca5.bonded_atoms if atom.type == ar_c and atom != self.ca6][0]
+        self.atoms.append(self.ca4)
+
+        # Save other nitrogen
+        if N.type == xlink_n:
+            self.N2 = [atom for atom in self.ca5.bonded_atoms if atom.type == xlink_n or atom.type == term_n][0]
+            self.atoms.append(self.N2)
+        else:
+            self.N1 = [atom for atom in self.ca5.bonded_atoms if atom.type == xlink_n or atom.type == term_n][0]
+            self.atoms.append(self.N1)
+
+        # Save aromatic hydrogens
+        self.ha1 = [atom for atom in self.ca1.bonded_atoms if atom.type == ar_h][0]
+        self.atoms.append(self.ha1)
+        self.ha2 = [atom for atom in self.ca2.bonded_atoms if atom.type == ar_h][0]
+        self.atoms.append(self.ha2)
+        self.ha4 = [atom for atom in self.ca4.bonded_atoms if atom.type == ar_h][0]
+        self.atoms.append(self.ha4)
+
+        # save either the aromatic hydrogen or chlorine on ca6
+        is_chlorinated = len([atom for atom in self.ca6.bonded_atoms if atom.type == cl]) == 1
+        if is_chlorinated:
+            self.cl = [atom for atom in self.ca6.bonded_atoms if atom.type == cl][0]
+            self.atoms.append(self.cl)
+        else:
+            self.ha6 = [atom for atom in self.ca6.bonded_atoms if atom.type == ar_h][0]
+            self.atoms.append(self.ha6)
+    
+        # Save hydrogens on nitrogens
+        hn1 = [atom for atom in self.N1.bonded_atoms if atom.type == hn]
+        self.hn1a = hn1[0]
+        self.atoms.append(self.hn1a)
+        if len(hn1) == 2:
+            self.hn1b = hn1[1]
+            self.atoms.append(self.hn1b)
+
+        hn2 = [atom for atom in self.N2.bonded_atoms if atom.type == hn]
+        self.hn2a = hn2[0]
+        self.atoms.append(self.hn2a)
+        if len(hn2) == 2:
+            self.hn2b = hn2[1]
+            self.atoms.append(self.hn2b)
+
+        # Classify fragment as monomer, linear, or terminated
+        n_hn = len(hn1) + len(hn2)
+        if n_hn == 4:
+            self.frag_type = 'mono'
+            self.name = 'MPD'
+        elif n_hn == 3:
+            self.frag_type = 'term'
+            self.name = 'MPD_T'
+        elif n_hn == 2:
+            self.frag_type = 'lin'
+            self.name = 'MPD_L'
+        else:
+            raise AttributeError(f'cannot have number of hn type = {n_hn}')
+        
+        if is_chlorinated:
+            self.name += '_Cl'
+
+    
+    def assign_charges(self, charges):
+        '''Assign charges to the fragment from the charges dictionary'''
+
+        for a_type in charges.keys():
+            charge = round(charges[a_type]['charge'], 8)
+            atom = getattr(self, a_type)
+            atom.charge = charge        
+
 
 class TMC():
     def __init__(self, C, ar_c='2', xlink_c='1', ar_h='3', deprot_o='9', prot_o='10', ho_type='5'):

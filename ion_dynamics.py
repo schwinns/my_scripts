@@ -536,9 +536,6 @@ class IonDynamics:
         anions = self.universe.select_atoms(f'resname CL')
         waters = self.waters.select_atoms(f'type OW')
 
-        if 'cations' not in radii:
-            radii['cations'] = cation_radius
-
         self.solute = Solute.from_atoms(ions,
                                 {
                                     'amide_o' : amide_o,

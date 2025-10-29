@@ -204,7 +204,7 @@ class IonDynamics:
         return self.__str__()
         
 
-    def extract_ion_trajectories(self, ions, filename='ion_trajectories.csv'):
+    def extract_ion_trajectories(self, ions, filename='ion_trajectories.csv', progress_bar=True):
         '''
         Extract the ion trajectories from the MD simulation and save as a csv file
 
@@ -214,6 +214,8 @@ class IonDynamics:
             AtomGroup with the ions to extract
         filename : str
             Name of the file to save trajectories to. Should be a csv. Default = 'ion_trajectories.csv'
+        progress_bar : bool, optional
+            Whether to show a progress bar during trajectory extraction. Default = True
 
         Returns
         -------
@@ -224,7 +226,7 @@ class IonDynamics:
         '''
 
         # first, get the trajectories as np.ndarray
-        traj = self._trajectory_to_numpy(ions)
+        traj = self._trajectory_to_numpy(ions, progress_bar=progress_bar)
 
         # pick only ions that are within the middle 50% of the polymer throughout the simulation
         self.membrane_ions_traj = {}
@@ -854,7 +856,7 @@ class IonDynamics:
         return states_array
     
 
-    def _trajectory_to_numpy(self, atom_group):
+    def _trajectory_to_numpy(self, atom_group, progress_bar=True):
         '''
         Convert the trajectories for atoms in a given atom group to a np.ndarray. Also, during each
         iteration, saves the polymer zones for each frame to `self.membrane_bounds`, which has shape
@@ -864,6 +866,8 @@ class IonDynamics:
         ----------
         atom_group : MDAnalysis AtomGroup
             AtomGroup to convert to a DataFrame
+        progress_bar : bool, optional
+            Whether to show a progress bar during trajectory extraction. Default = True
         
         Returns
         -------
@@ -874,7 +878,7 @@ class IonDynamics:
 
         self._traj_array = np.zeros((self.universe.trajectory.n_frames, atom_group.n_atoms, 3))
         self.membrane_bounds = np.zeros((self.universe.trajectory.n_frames, 5))
-        for i,ts in tqdm(enumerate(self.universe.trajectory)):
+        for i,ts in tqdm(enumerate(self.universe.trajectory), disable=not progress_bar):
             self.membrane_bounds[i,:] = self.polymer_zones
             self._traj_array[i,:,:] = atom_group.positions
 

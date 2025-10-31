@@ -12,6 +12,7 @@ import networkx as nx
 
 import MDAnalysis as mda
 import MDAnalysis.transformations as trans
+from MDAnalysis.analysis import distances
 
 class PolymAnalysis():
     def __init__(self, data_file, frmt='DATA', init_file='system.in.init', settings_file='cleanedsystem.in.settings',

@@ -101,6 +101,129 @@ class MPD():
         for a_type in charges.keys():
             charge = round(charges[a_type]['charge'], 8)
             atom = getattr(self, a_type)
+            atom.charge = charge
+
+
+class MPD_Cl_T():
+    def __init__(self, N, cl='6', xlink_n='7', ar_c='2', term_n='8', ar_h='3', hn='4'):
+        '''
+        N should be one of the 2 nitrogens on the MPD monomer
+        
+        Positions on MPD ring
+               _1_
+         Cl   4    2
+         |    |    |
+         N2 - 5_  _3 - N1
+                6
+
+        '''
+
+        # Save input nitrogen and molecule information
+        if N.type == xlink_n: 
+            self.N1 = N
+            self.atoms = [self.N1]
+        else:
+            self.N2 = N
+            self.atoms = [self.N2]
+        self.mol = N.residue
+
+        # Define the aromatic carbons by diagram above
+        self.ca3 = [atom for atom in N.bonded_atoms if atom.type == ar_c][0]
+        self.atoms.append(self.ca3)
+        
+        ca26 = [atom for atom in self.ca3.bonded_atoms if atom.type == ar_c]
+        for ca in ca26:
+            ca5 = [atom for atom in ca.bonded_atoms if atom != self.ca3 and (xlink_n in atom.bonded_atoms.types or term_n in atom.bonded_atoms.types)]
+            if len(ca5) > 0:
+                self.ca5 = ca5[0]
+                self.atoms.append(self.ca5)
+                self.ca6 = ca
+                self.atoms.append(self.ca6)
+            else:
+                self.ca1 = [atom for atom in ca.bonded_atoms if atom.type == ar_c and atom != self.ca3][0]
+                self.atoms.append(self.ca1)
+                self.ca2 = ca
+                self.atoms.append(self.ca2)
+
+        self.ca4 = [atom for atom in self.ca5.bonded_atoms if atom.type == ar_c and atom != self.ca6][0]
+        self.atoms.append(self.ca4)
+
+        # Save other nitrogen
+        if N.type == xlink_n:
+            self.N2 = [atom for atom in self.ca5.bonded_atoms if atom.type == xlink_n or atom.type == term_n][0]
+            self.atoms.append(self.N2)
+        else:
+            self.N1 = [atom for atom in self.ca5.bonded_atoms if atom.type == xlink_n or atom.type == term_n][0]
+            self.atoms.append(self.N1)
+
+        # Save aromatic hydrogens
+        self.ha1 = [atom for atom in self.ca1.bonded_atoms if atom.type == ar_h][0]
+        self.atoms.append(self.ha1)
+        self.ha2 = [atom for atom in self.ca2.bonded_atoms if atom.type == ar_h][0]
+        self.atoms.append(self.ha2)
+        self.ha4 = [atom for atom in self.ca4.bonded_atoms if atom.type == ar_h][0]
+        self.atoms.append(self.ha4)
+        self.ha6 = [atom for atom in self.ca6.bonded_atoms if atom.type == ar_h][0]
+        self.atoms.append(self.ha6)
+    
+        # Save hydrogens on nitrogens
+        hn1 = [atom for atom in self.N1.bonded_atoms if atom.type == hn]
+        self.hn1a = hn1[0]
+        self.atoms.append(self.hn1a)
+        if len(hn1) == 2:
+            self.hn1b = hn1[1]
+            self.atoms.append(self.hn1b)
+
+        hn2 = [atom for atom in self.N2.bonded_atoms if atom.type == hn]
+        self.hn2a = hn2[0]
+        self.atoms.append(self.hn2a)
+        if len(hn2) == 2:
+            self.hn2b = hn2[1]
+            self.atoms.append(self.hn2b)
+
+        # save chlorines
+        if len(hn1) == 1 and len(hn2) == 1 and self.N1.type == term_n and self.N2.type == term_n: # if N1 and N2 are terminal, and they both only have 1 H, they both must be chlorinated
+            self.cl1 = [atom for atom in self.N1.bonded_atoms if atom.type == cl][0]
+            self.cl2 = [atom for atom in self.N2.bonded_atoms if atom.type == cl][0]
+        elif len(hn1) == 1 and self.N1.type == term_n: # if N1 is terminal and only has 1 H, it must be chlorinated
+            self.cl = [atom for atom in self.N1.bonded_atoms if atom.type == cl][0]
+        elif len(hn2) == 1 and self.N2.type == term_n: # if N2 is terminal and only has 1 H, it must be chlorinated
+            self.cl = [atom for atom in self.N2.bonded_atoms if atom.type == cl][0]
+        else:
+            raise AttributeError(f'cannot find chlorine atom(s) on MPD_Cl_T fragment with nitrogen atom {N}')
+
+        # Classify fragment
+        n_hn = len(hn1) + len(hn2)
+        if n_hn == 3: # for this class (MPD_Cl_T), the hn=3 case is MPD_Cl, that is a monomer with a Cl
+            self.frag_type = 'mono'
+            if 'cl' in self.N1.bonded_atoms.types: # just means that Cl is on N1
+                self.name = 'MPD_Cl_1'
+            elif 'cl' in self.N2.bonded_atoms.types:
+                self.name = 'MPD_Cl_2'
+            else:
+                raise AttributeError(f'cannot find chlorine atom on MPD_Cl_T fragment with nitrogen atom {N}')
+        elif n_hn == 2: # for this class (MPD_Cl_T), the hn=2 case can be MPD_T_Cl or a doubly chlorinated monomer
+            if 'cl' in self.N1.bonded_atoms.types and 'cl' in self.N2.bonded_atoms.types:
+                self.frag_type = 'mono'
+                self.name = 'MPD_2Cl'
+            else:
+                self.frag_type = 'term'
+                if self.cl in self.N1.bonded_atoms: # just means that Cl is on N1
+                    self.name = 'MPD_T_Cl_1'
+                elif self.cl in self.N2.bonded_atoms:
+                    self.name = 'MPD_T_Cl_2'
+                else:
+                    raise AttributeError(f'cannot find chlorine atom on MPD_T_Cl fragment with nitrogen atom {N}')
+        else:
+            raise AttributeError(f'cannot have number of hn type = {n_hn}')
+
+    
+    def assign_charges(self, charges):
+        '''Assign charges to the fragment from the charges dictionary'''
+
+        for a_type in charges.keys():
+            charge = round(charges[a_type]['charge'], 8)
+            atom = getattr(self, a_type)
             atom.charge = charge        
 
 
@@ -483,7 +606,26 @@ class TMC():
                 self.name = 'TMC_T_2P_3'
         elif n_oh == 3:
             self.frag_type = 'mono'
-            self.name = 'TMC'
+            self.name = 'TMC_3P'
+        elif n_oh == 1 and n_dp == 2:
+            self.frag_type = 'mono'
+            if c_types[0] == 'term_P': # this just means that C1 is protonated
+                self.name = 'TMC_1P_1'
+            elif c_types[1] == 'term_P': # C2 is protonated
+                self.name = 'TMC_1P_2'
+            elif c_types[2] == 'term_P': # C3 is protonated
+                self.name = 'TMC_1P_3'
+        elif n_oh == 2 and n_dp == 1:
+            self.frag_type = 'mono'
+            if c_types[0] == 'term_D': # C1 is deprotonated
+                self.name = 'TMC_2P_1'
+            elif c_types[1] == 'term_D': # C2 is deprotonated
+                self.name = 'TMC_2P_2'
+            elif c_types[2] == 'term_D': # C3 is deproton
+                self.name = 'TMC_2P_3'
+        elif n_dp == 3:
+            self.frag_type = 'mono'
+            self.name = 'TMC_0P'
         else:
             raise AttributeError(f'cannot have number of protonated Os = {n_oh} and number of deprotonated Os = {n_dp}')
 
@@ -498,7 +640,7 @@ class TMC():
             
 
 
-def check_N(N):
+def check_N(N, nh_type='8', n_type='7', ar_c_type='2'):
 
     # input the atom N to check the other N
     #   if the other N is type NH, then MPD-T
@@ -511,17 +653,17 @@ def check_N(N):
     # N - 5_  _3 - N
     #       6
 
-    if N.type == '8':
+    if N.type == nh_type:
         n_NH = 1
-    elif N.type == '7':
+    elif N.type == n_type:
         n_NH = 0
     else:
         raise ValueError(f'{N} is not a N')
     
-    CA3 = [atom for atom in N.bonded_atoms if atom.type == '2'][0]
-    CA26 = [atom for atom in CA3.bonded_atoms if atom.type == '2']
+    CA3 = [atom for atom in N.bonded_atoms if atom.type == ar_c_type][0]
+    CA26 = [atom for atom in CA3.bonded_atoms if atom.type == ar_c_type]
     for CA in CA26:
-        n_NH += len([atom for atom in CA.bonded_atoms if atom != CA3 and atom.type == '2' and '8' in atom.bonded_atoms.types])
+        n_NH += len([atom for atom in CA.bonded_atoms if atom != CA3 and atom.type == ar_c_type and nh_type in atom.bonded_atoms.types])
 
     return n_NH
 

@@ -549,7 +549,7 @@ class GromacsTopology:
                 elif my_lines[d].startswith('[ dihedrals ]'):
                     self._parse_dihedrals(molecule, my_lines[d+1:dir_idx[i+1]])
                 elif my_lines[d].startswith('[ exclusions ]'):
-                    self._parse_exclusions(molecule, my_lines[d+1:dir_idx[i+1]])
+                    self._parse_exclusions(molecule, my_lines[d+1:dir_idx[i+1]+1]) # HARD-CODED to include last line
                 elif my_lines[d].startswith('[ system ]'):
                     self._parse_system(my_lines[d+1:dir_idx[i+1]+1])
                 elif '[' in my_lines[d]:

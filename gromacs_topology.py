@@ -1,5 +1,7 @@
 # Classes for reading a Gromacs topology file
 
+from collections import Counter
+from copy import copy
 import numpy as np
 
 class AtomType:
@@ -23,6 +25,10 @@ class AtomType:
 
     def __str__(self):
         return f'{self.type}'
+
+    
+    def copy(self):
+        return copy(self)
 
 
 class Bond:
@@ -527,33 +533,39 @@ class GromacsTopology:
         idx_end = [i+idx for i,line in enumerate(self.cleaned[idx:]) if line.startswith('[ molecule')][0]
         my_lines = self.cleaned[idx+1:idx_end]
 
-        # get indices of directives
-        dir_idx = [i for i,line in enumerate(my_lines) if line.startswith('[ ')]
-        dir_idx.append(len(my_lines)-1)
-        
-        # WARNING: hard-coding for ions, which only have [ atoms ] directive
-        if len(dir_idx) == 2 and my_lines[dir_idx[0]].startswith('[ atoms ]'):
-            self._parse_atoms(molecule, [my_lines[dir_idx[1]]])
+        # find directive header lines (e.g. '[ atoms ]', '[ bonds ]', ...)
+        dir_idx = [i for i,line in enumerate(my_lines) if line.strip().startswith('[')]
+        if len(dir_idx) == 0:
+            return
 
-        else:
-            # add directives to molecule
-            for i,d in enumerate(dir_idx):
-                if my_lines[d].startswith('[ atoms ]'):
-                    self._parse_atoms(molecule, my_lines[d+1:dir_idx[i+1]])
-                elif my_lines[d].startswith('[ bonds ]'):
-                    self._parse_bonds(molecule, my_lines[d+1:dir_idx[i+1]])
-                elif my_lines[d].startswith('[ settles ]'):
-                    self._parse_settles(molecule, my_lines[d+1:dir_idx[i+1]])
-                elif my_lines[d].startswith('[ angles ]'):
-                    self._parse_angles(molecule, my_lines[d+1:dir_idx[i+1]])
-                elif my_lines[d].startswith('[ dihedrals ]'):
-                    self._parse_dihedrals(molecule, my_lines[d+1:dir_idx[i+1]])
-                elif my_lines[d].startswith('[ exclusions ]'):
-                    self._parse_exclusions(molecule, my_lines[d+1:dir_idx[i+1]+1]) # HARD-CODED to include last line
-                elif my_lines[d].startswith('[ system ]'):
-                    self._parse_system(my_lines[d+1:dir_idx[i+1]+1])
-                elif '[' in my_lines[d]:
-                    dir_type = my_lines[d].split('[ ')[1].split(' ]')[0]
+        # sentinel -- end of last directive is end of my_lines
+        dir_idx.append(len(my_lines))
+
+        # iterate directives and parse their block (start+1 : next_start)
+        for i in range(len(dir_idx)-1):
+            start = dir_idx[i]
+            end = dir_idx[i+1]
+            header = my_lines[start].strip()
+            block = my_lines[start+1:end]
+
+            if header.startswith('[ atoms ]'):
+                self._parse_atoms(molecule, block)
+            elif header.startswith('[ bonds ]'):
+                self._parse_bonds(molecule, block)
+            elif header.startswith('[ settles ]'):
+                self._parse_settles(molecule, block)
+            elif header.startswith('[ angles ]'):
+                self._parse_angles(molecule, block)
+            elif header.startswith('[ dihedrals ]'):
+                # block now correctly contains all dihedral lines up to next directive / end
+                self._parse_dihedrals(molecule, block)
+            elif header.startswith('[ exclusions ]'):
+                self._parse_exclusions(molecule, block)
+            elif header.startswith('[ system ]'):
+                self._parse_system(block)
+            else:
+                if '[' in header:
+                    dir_type = header.split('[ ')[1].split(' ]')[0]
                     raise TypeError(f'Cannot parse directive type [ {dir_type} ]')
 
 
@@ -632,3 +644,44 @@ class GromacsTopology:
             out.writelines(all_lines)
 
         print(f'Finished writing topology to {filename}!')
+
+    def get_bond(self, atomtype1, atomtype2):
+        '''Get the bond between two atom types in a topology.'''
+
+        atomtypes = [atomtype1, atomtype2]
+
+        for b in self.bonds:
+            my_types = [a.type for a in b.atoms]
+            if Counter(my_types) == Counter(atomtypes):
+                return b
+        return None
+
+
+    def get_angle(self, atomtype1, atomtype2, atomtype3):
+        '''Get the angle among three atom types in a topology.'''
+
+        atomtypes = [atomtype1, atomtype2, atomtype3]
+
+        for a in self.angles:
+            my_types = [a.type for a in a.atoms]
+            if Counter(my_types) == Counter(atomtypes):
+                return a
+        return None
+
+
+    def get_dihedral(self, atomtype1, atomtype2, atomtype3, atomtype4, is_improper=False):
+        '''Get the dihedral among four atom types in a topology. Should specify if this dihedral is improper.'''
+
+        atomtypes = [atomtype1, atomtype2, atomtype3, atomtype4]
+        improper_types = [2, 4] # either harmonic (2) or periodic (4) improper
+
+        for d in self.dihedrals:
+            my_types = [a.type for a in d.atoms]
+            if Counter(my_types) == Counter(atomtypes):
+                if is_improper and d.type in improper_types:
+                    return d
+                
+                if not is_improper and d.type not in improper_types:
+                    return d
+                
+        return None

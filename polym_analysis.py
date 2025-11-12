@@ -1700,14 +1700,13 @@ class PolymAnalysis():
         for ang in n_top.angles:
             a1, a2, a3 = ang.atoms
             my_types = [a.type for a in ang.atoms]
-            print(my_types)
 
             if Counter(my_types) == Counter(['ca', 'nh', 'hn']):
                 continue  # this improper is skipped in the moltemplate GAFF topology
             
-            dih = param_top.get_dihedral(a1.type, a2.type, a3.type, new_atom.type)
-            my_dihedral = Dihedral(a1, a2, a3, new_atom, dih.type, dih._params)
-            molecule.dihedrals.append(my_dihedral)
+            dih = param_top.get_dihedral(a1.type, a2.type, a3.type, new_atom.type) 
+            my_dihedral = Dihedral(a1, a2, a3, new_atom, dih.type, dih._params) # WARNING: make sure these are in the correct order
+            molecule.dihedrals.append(my_dihedral) # middle two atoms need to be the middle atoms of the dihedral
 
         print(f'\tAdded Cl atom to broken amide N atom index {n.index} as atom index {total_atoms}')
         total_atoms += 1
@@ -1761,14 +1760,25 @@ class PolymAnalysis():
         my_o_c_bond = Bond(new_atom, my_C_top, b.type, b._params)
         molecule.bonds.append(my_o_c_bond)
 
+        my_C_top_bonded_atoms = []
         new_angles = []
+        print('Bonds:')
         for b in my_C_top.bonds:
+
+            my_C_top_bonded_atoms.append([a for a in b.atoms if a != my_C_top][0])
+
+            # need my_C_top to be in the middle of the angle
+            # new o atom will always be an "outside" atom bonded to the c
+            # for example, o-c-o
             a1, a2 = b.atoms
+            other_atom = a1 if a2 == my_C_top else a2
+
             angle = param_top.get_angle(a1.type, a2.type, new_atom.type)
-            my_angle = Angle(a1, a2, new_atom, angle.type, angle._params)
+            my_angle = Angle(other_atom, my_C_top, new_atom, angle.type, angle._params)
             molecule.angles.append(my_angle)
             new_angles.append(my_angle)
 
+        print('\nAngles:')
         new_dihedrals = []
         for ang in my_C_top.angles:
             a1, a2, a3 = ang.atoms
@@ -1780,7 +1790,23 @@ class PolymAnalysis():
                 is_improper = False
 
             dih = param_top.get_dihedral(a1.type, a2.type, a3.type, new_atom.type, is_improper=is_improper)
-            my_dihedral = Dihedral(a1, a2, a3, new_atom, dih.type, dih._params)
+            
+            # for impropers, the 3rd atom in the list is the central atom
+            # for example, ca-o-c-oh is an improper for a carboxylic acid on benzene ring
+            # for proper dihedrals, the middle two atoms are the middle atoms of the dihedral
+            # and the outer two atoms are bonded to the nearest middle atom
+            # for example, o-c-oh-ho is a proper dihedral for a carboxylic acid
+
+            if is_improper:
+                # as long as my_C_top is the 3rd atom, the order of the other atoms does not matter
+                my_dihedral = Dihedral(a1, a2, my_C_top, new_atom, dih.type, dih._params)
+            else:
+                # if we set my_C_top as the 3rd atom, the new_atom has to be the 4th atom
+                others = [at for at in ang.atoms if at is not my_C_top]
+                other_atom2 = [o for o in others if o in my_C_top_bonded_atoms][0] # this one must be bonded to my_C_top
+                other_atom1 = [o for o in others if o is not other_atom2][0]
+                my_dihedral = Dihedral(other_atom1, other_atom2, my_C_top, new_atom, dih.type, dih._params)
+            
             molecule.dihedrals.append(my_dihedral)
             new_dihedrals.append(my_dihedral)
 
@@ -1842,18 +1868,30 @@ class PolymAnalysis():
         my_oh_ho_bond = Bond(my_O_top, new_H_atom, b.type, b._params)
         molecule.bonds.append(my_oh_ho_bond)
 
+        my_O_top_bonded_atoms = []
+        print('Bonds:')
         for b in my_O_top.bonds:
             a1, a2 = b.atoms
+            my_O_top_bonded_atoms.append([a for a in b.atoms if a != my_O_top][0])
+
+            other_atom = a1 if a2 == my_O_top else a2
             angle = param_top.get_angle(a1.type, a2.type, new_H_atom.type)
-            my_angle = Angle(a1, a2, new_H_atom, angle.type, angle._params)
+            my_angle = Angle(other_atom, my_O_top, new_H_atom, angle.type, angle._params) # the hydrogen should always be 3rd atom
             molecule.angles.append(my_angle)
 
+        print('\nAngles:')
         for ang in my_O_top.angles:
             a1, a2, a3 = ang.atoms
+
+            # this should be set up properly, but let's be sure that my_O_top is the 3rd atom and new_H_atom is last
+            others = [at for at in ang.atoms if at is not my_O_top]
+            other_atom2 = [o for o in others if o in my_O_top_bonded_atoms][0] # this one must be bonded to my_O_top
+            other_atom1 = [o for o in others if o is not other_atom2][0]
+            
             dih = param_top.get_dihedral(a1.type, a2.type, a3.type, new_H_atom.type)
-            my_dihedral = Dihedral(a1, a2, a3, new_H_atom, dih.type, dih._params)
+            my_dihedral = Dihedral(other_atom1, other_atom2, my_O_top, new_H_atom, dih.type, dih._params)
             molecule.dihedrals.append(my_dihedral)
-            print(f'Added dihedral: {a1.idx}-{a2.idx}-{a3.idx}-{new_H_atom.idx}, {my_dihedral}')
+            print(f'Added dihedral: {other_atom1.idx}-{other_atom2.idx}-{my_O_top.idx}-{new_H_atom.idx} with types {other_atom1.type}-{other_atom2.type}-{my_O_top.type}-{new_H_atom.type}')
 
         print(f'\tAdded H atom to broken amide C atom index {c.index} as atom index {total_atoms}')
         total_atoms += 1

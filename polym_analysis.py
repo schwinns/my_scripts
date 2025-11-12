@@ -1,5 +1,6 @@
 # Class for building and analysis of polyamide membrane
 
+from collections import Counter
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -7,6 +8,7 @@ import seaborn as sns
 from matplotlib.ticker import MultipleLocator
 from tqdm import tqdm
 import subprocess
+import yaml
 
 import networkx as nx
 
@@ -78,9 +80,6 @@ class PolymAnalysis():
         self.cation_type = cation_type
         self.anion_type = anion_type
 
-        # store polymer AtomGroup
-        self.polymer = self.universe.select_atoms(f'not type {self.ow_type} {self.hw_type} {self.anion_type} {self.cation_type}')
-
         # Get coordinate information
         self.coords = np.zeros((1,self.n_atoms, 3))
         self.coords[0,:,:] = self.atoms.positions
@@ -105,6 +104,10 @@ class PolymAnalysis():
 
     def __str__(self):
         return f'<PolymAnalysis object with {self.n_atoms} atoms from {self.filename}>'
+
+    @property
+    def polymer(self):
+       return self.universe.select_atoms(f'not type {self.ow_type} {self.hw_type} {self.anion_type} {self.cation_type}')
 
 
     def _run(self, commands):
@@ -892,8 +895,6 @@ class PolymAnalysis():
     def insert_cations_in_membrane(self, ion_name='Na', ion_charge=1, extra_inserted=0, tol=2, output='PA_ions.gro'):
         '''Add ions to the membrane by merging universe with ion universe'''
 
-        from MDAnalysis.analysis import distances
-
         # locate COOH/COO- oxygens
         c_group = self.universe.select_atoms('type c and not bonded type n')
         deprot_o = []
@@ -1215,27 +1216,1244 @@ class PolymAnalysis():
         return n_ions, output, excess_charge
 
 
-    def insert_ions(self, n_anions=0, anion_name=None, anion_charge=-1, n_cations=0, cation_name=None, cation_charge=1, top='PA_ions.top', output='PA_ions.gro', water_sel=18):
+    def random_amides(self, num, seed=12345):
+        '''Randomly select num of amide bonds to break'''
+
+        sel = self.universe.select_atoms(f'type {self.xlink_n_type}')
+        n = len(sel)
+        rng = np.random.default_rng(seed=seed)
+        rand_idx = rng.choice(np.arange(0,n), size=num, replace=False)
+        
+        return sel[rand_idx]
+
+
+    def remove_water_for_Cl(self, n, radius_for_water_search=6, n_waters=4, tol=2):
+        my_waters = self.universe.atoms.select_atoms(f'(type {self.ow_type}) and (sphzone {radius_for_water_search} index {n.index})')
+        if len(my_waters) < n_waters:
+            raise ValueError('Not enough waters found near amide N atom index', n.index)
+        
+        # # save the positions of the waters to be replaced
+        # original_pos = my_waters[0].position.copy()
+        # pos = my_waters[0].position
+
+        # estimate where Cl should be based on n, hn
+        hn = [a for a in n.bonded_atoms if a.type == 'hn'][0]
+        d = 1.763 # hard-code force field parameters for now
+        original_pos = solve_for_Cl_position(hn.position, n.position, d)
+        pos = original_pos.copy()
+
+        # remove the water and rebuild a universe with fewer residues
+        remaining_atoms = self.universe.atoms - my_waters[:n_waters].residues.atoms
+        new_universe = mda.Merge(remaining_atoms)
+        new_universe.dimensions = self.universe.dimensions
+        self.universe = new_universe
+        self.atoms = self.universe.atoms
+
+        # reassign residue numbers after deleted waters
+        n_residues = len(self.universe.atoms.residues)
+        resids = np.arange(1, n_residues+1)
+        self.universe.add_TopologyAttr('resid', list(resids))
+
+        # # randomly kick the Cl around until it is at least 2 Angstroms away from all other atoms
+        # i = 0
+        # too_close = self.universe.select_atoms(f'point {pos[0]} {pos[1]} {pos[2]} {tol}')
+        # n_close = len(too_close)
+        # while n_close > 0:
+        #     kick_vec = np.random.uniform(-1,1, size=3) # random direction for kick
+        #     kick_vec = kick_vec / np.linalg.norm(kick_vec) 
+        #     kick_strength = np.random.uniform(0,0.1) # kick is between 0 and 0.1 Angstroms
+
+        #     pos += kick_strength*kick_vec
+        #     too_close = self.universe.select_atoms(f'point {pos[0]} {pos[1]} {pos[2]} {tol}')
+
+        #     # check distance to the N it will be bonded to
+        #     dists = distances.distance_array(pos, n.position, box=self.universe.dimensions)
+        #     print(f'\n\tDistance between Cl and N: {dists[0,0]:.4f}')
+        #     n_close = len(too_close)
+        #     print(f'\t{n_close} atoms are too close to Cl: {[a for a in too_close]}')
+            
+        #     i += 1
+        #     if i == 50_000:
+        #         print(f'failed on {n} with {n_close} atoms too close')
+        #         [print(f'\t{a}') for a in too_close]
+        #         exit()
+
+        #     if dists[0,0] > 6: # start over if Cl is too far from N
+        #         pos = original_pos.copy()
+        #         i = 0
+        #         print(f'\tReset position to {pos}')
+
+        return pos
+
+
+    def remove_water_for_OH(self, c, Cl_position, radius_for_water_search=6, n_waters=4, protonate=False, tol=2):
+        '''Remove water to make room for OH group'''
+        my_waters = self.universe.atoms.select_atoms(f'(type {self.ow_type}) and (sphzone {radius_for_water_search} index {c.index})')
+        if len(my_waters) < n_waters:
+            raise ValueError('Not enough waters found near amide C atom index', c.index)
+
+        # estimate where O should be based on c, o, ca
+        o = [a for a in c.bonded_atoms if a.type == 'o'][0]
+        ca = [a for a in c.bonded_atoms if a.type == 'ca'][0]
+        theta = 122.88 # hard-code force field parameters for now
+        d = 1.306 # c-oh bond length in Angstroms
+        original_O_pos,original_H_pos = solve_for_OH_position(o.position, c.position, ca.position, theta, d)
+        O_position = original_O_pos.copy()
+        H_position = original_H_pos.copy()
+
+        # place the O at the N, since it is closest to where it needs to be
+        # n = [a for a in c.bonded_atoms if a.type == self.xlink_n_type][0]
+        # original_O_pos = n.position.copy()
+        # original_H_pos = n.position.copy() + np.array([0.0, 0.0, 0.96]) # place H 0.96 Angstroms away from O initially
+        # O_position = n.position
+        # H_position = n.position + np.array([0.0, 0.0, 0.96])
+
+        print('\tOriginal O position:', original_O_pos)
+        print('\tOriginal H position:', original_H_pos)
+
+        # # save the positions of the waters to be replaced
+        # original_O_pos = my_waters[0].position.copy()
+        # original_H_pos = my_waters[0].bonded_atoms[1].position.copy()
+        # O_position = my_waters[0].position
+        # H_position = my_waters[0].bonded_atoms[1].position  # for 50% deprotonated, we want to add O- for half and OH for half
+
+        # # randomly kick the O around until it is at least 2 Angstroms away from all other atoms
+        # i = 0
+        # too_close = self.universe.select_atoms(f'point {O_position[0]} {O_position[1]} {O_position[2]} {tol}') - my_waters[:n_waters].residues.atoms
+        # n_close = len(too_close)
+        # while n_close > 0:
+        #     kick_vec = np.random.uniform(-1,1, size=3) # random direction for kick
+        #     kick_vec = kick_vec / np.linalg.norm(kick_vec) 
+        #     kick_strength = np.random.uniform(0,0.1) # kick is between 0 and 0.1 Angstroms
+
+        #     O_position += kick_strength*kick_vec
+        #     H_position += kick_strength*kick_vec # drag H along with O
+        #     too_close_dists = distances.distance_array(O_position, (self.universe.atoms - my_waters[:n_waters].residues.atoms).positions, box=self.universe.dimensions)
+        #     print(f'\n\tDistances between O and other atoms below tolerance: {too_close_dists[too_close_dists < tol]}')
+        #     n_close = (too_close_dists < tol).sum()
+        #     too_close = self.universe.select_atoms(f'point {O_position[0]} {O_position[1]} {O_position[2]} {tol}') - my_waters[:n_waters].residues.atoms
+        #     print(f'\tToo close atoms: {[a for a in too_close]}')
+
+        #     # make sure it does not overlap the inserted Cl
+        #     dists = distances.distance_array(O_position, Cl_position, box=self.universe.dimensions)
+        #     print(f'\tDistance between O and Cl: {dists[0,0]:.4f}')
+        #     n_close += (dists < tol).sum()
+
+        #     # check distance to the C it will be bonded to
+        #     dists = distances.distance_array(O_position, c.position, box=self.universe.dimensions)
+        #     print(f'\tDistance between O and C: {dists[0,0]:.4f}')
+
+        #     i += 1
+        #     if i == 50_000:
+        #         print(f'\tfailed on {c} with {n_close} atoms too close')
+        #         [print(f'\t{a}') for a in too_close]
+        #         exit()
+
+        #     if dists[0,0] > 6: # start over if O is too far from C
+        #         O_position = original_O_pos.copy()
+        #         H_position = original_H_pos.copy()
+        #         i = 0
+        #         print(f'\tReset position to {O_position}')
+
+
+        # remove the water and rebuild a universe with fewer residues
+        print(f'\tDeleting water atoms {my_waters[:n_waters].residues.atoms}')
+        remaining_atoms = self.universe.atoms - my_waters[:n_waters].residues.atoms
+        new_universe = mda.Merge(remaining_atoms)
+        new_universe.dimensions = self.universe.dimensions
+        self.universe = new_universe
+        self.atoms = self.universe.atoms
+
+        # reassign residue numbers after deleted waters
+        n_residues = len(self.universe.atoms.residues)
+        resids = np.arange(1, n_residues+1)
+        self.universe.add_TopologyAttr('resid', list(resids))
+
+        if protonate:
+            return O_position, H_position
+        else:
+            return O_position
+
+
+    def reassign_residue_indices(self):
+        '''Reassign residue indices after breaking bonds and creating new molecules'''
+
+        # Reassign residue indices based on connected components
+        atom_to_new_resindex = {}
+        new_resindex_to_atom = {}
+        n_new_residues = 0
+
+        for residue in self.polymer.residues:
+            res_atoms = residue.atoms
+            res_graph = build_graph_from_atoms(res_atoms)
+            
+            # Get connected components for this residue
+            components = list(nx.connected_components(res_graph))
+            
+            for component in components:
+                new_resindex_to_atom[n_new_residues] = []
+                # Assign all atoms in this component to the same new residue
+                for atom_idx in component:
+                    atom_to_new_resindex[atom_idx] = n_new_residues
+                    new_resindex_to_atom[n_new_residues].append(atom_idx)
+                
+                new_resindex_to_atom[n_new_residues] = np.array(new_resindex_to_atom[n_new_residues])
+                n_new_residues += 1
+
+        # Create a new empty universe with correct number of residues
+        n_atoms = len(self.polymer.atoms)
+        new_polymer_u = mda.Universe.empty(
+            n_atoms=n_atoms,
+            n_residues=n_new_residues,
+            atom_resindex=[atom_to_new_resindex[atom.index] for atom in self.polymer.atoms],
+            trajectory=True
+        )
+
+        # Copy over topology attributes
+        new_polymer_u.add_TopologyAttr('name', [atom.name for atom in self.polymer.atoms])
+        new_polymer_u.add_TopologyAttr('type', [atom.type for atom in self.polymer.atoms])
+        new_polymer_u.add_TopologyAttr('element', [atom.element for atom in self.polymer.atoms])
+        new_polymer_u.add_TopologyAttr('mass', [atom.mass for atom in self.polymer.atoms])
+        new_polymer_u.add_TopologyAttr('resname', [f'PA{i}' for i in range(1, n_new_residues + 1)])
+        new_polymer_u.add_TopologyAttr('resid', [i for i in range(1, n_new_residues + 1)])
+
+        # Copy positions and bonds
+        new_polymer_u.atoms.positions = self.polymer.atoms.positions
+        bond_indices = [(b.atoms[0].index, b.atoms[1].index) for b in self.polymer.bonds]
+        new_polymer_u.add_TopologyAttr('bonds', bond_indices)
+
+        # Merge with non-polymer atoms
+        waters = self.universe.select_atoms(f'type {self.ow_type} {self.hw_type}')
+        ions = self.universe.select_atoms(f'type {self.cation_type} {self.anion_type}')
+        merged_u = mda.Merge(new_polymer_u.atoms, waters+ions)
+        merged_u.dimensions = self.universe.dimensions
+
+        # Reassign resids to be sequential
+        # Polymer residues: 1 to n_new_residues
+        # Non-polymer residues: n_new_residues+1 onwards
+        non_polymer_start_idx = n_new_residues + 1
+
+        # Get the non-polymer residues and renumber them
+        for i, res in enumerate(merged_u.residues[n_new_residues:], start=non_polymer_start_idx):
+            for atom in res.atoms:
+                atom.residue.resid = i
+
+        # Replace the universe
+        self.universe = merged_u
+        print(f'\tNumber of new polymer residues: {n_new_residues}')
+
+        return atom_to_new_resindex, new_resindex_to_atom
+
+
+    def update_topology_after_breaking_bond(self, top, n, c, new_resindex_to_atom, atom_to_new_resindex):
+        '''Update topology file after breaking amide bonds'''
+
+        # update the topology file
+        # my GromacsTopology class writes out only using the molecules, so it should be fine if we update all the molecule information
+        from gromacs_topology import Molecule
+
+        polymer_idx = self.polymer.indices
+        broken_amide_N_idx = n.index
+        broken_amide_C_idx = c.index
+        n_new_residues = len(new_resindex_to_atom)
+
+        # initialize new molecules
+        new_molecules = []
+        for i in range(1, n_new_residues + 1):
+            mol = Molecule(f'PA{i}', 1)
+            setattr(mol, 'atoms', [])
+            setattr(mol, 'bonds', [])
+            setattr(mol, 'angles', [])
+            setattr(mol, 'dihedrals', [])
+
+            mol.directives = ['bonds', 'angles', 'dihedrals']
+            new_molecules.append(mol)
+
+        # loop through all atoms and assign to new molecules
+        for atom in top.atoms[polymer_idx]:
+            # add to new molecule
+            resindex = atom_to_new_resindex[atom.idx]
+            my_map = {orig_idx : new_idx+1 for new_idx,orig_idx in enumerate(new_resindex_to_atom[resindex])} # renumbering map within new residue
+            
+            # update atom attributes for new molecule
+            atom.num = my_map[atom.idx]
+            atom.resnum = resindex + 1
+            atom.resname = f'PA{resindex + 1}'
+
+            my_mol = new_molecules[resindex]
+            my_mol.atoms.append(atom)
+
+        # sort the atoms in each new molecule by their new atom number
+        for mol in new_molecules:
+            mol.atoms.sort(key=lambda a: a.num)
+
+        # loop through all bonds and assign to new molecules
+        n_bonds_skipped = 0
+        for bond in top.bonds: # this is all polymer bonds because water uses settles and monoatomic ions have no bonds
+            atom1, atom2 = bond.atoms
+            my_types = [a.type for a in bond.atoms]
+            my_mol = new_molecules[atom_to_new_resindex[atom1.idx]]
+
+            if 'c' in my_types and 'n' in my_types:
+                c_atom = atom1 if atom1.type == 'c' else atom2
+                n_atom = atom1 if atom1.type == 'n' else atom2
+                if c_atom.idx == broken_amide_C_idx and n_atom.idx == broken_amide_N_idx:
+                    # skip amide bonds that have been broken, which deletes them from the new molecule
+                    # print(f'Skipping bond between atoms {atom1.idx}:{atom1.type} and {atom2.idx}:{atom2.type}')
+                    n_bonds_skipped += 1
+                    continue
+
+            my_mol.bonds.append(bond)
+
+        print(f'\t\tSkipped {n_bonds_skipped} bonds corresponding to broken amide bonds')
+
+        # loop through all angles and assign to new molecules
+        n_angles_skipped = 0
+        for angle in top.angles: # this is all polymer angles because water uses settles and monoatomic ions have no angles
+            atom1, atom2, atom3 = angle.atoms
+            my_types = [a.type for a in angle.atoms]
+            my_mol = new_molecules[atom_to_new_resindex[atom1.idx]]
+
+            if 'c' in my_types and 'n' in my_types:
+                c_atom = [atom for atom in angle.atoms if atom.type == 'c'][0]
+                n_atom = [atom for atom in angle.atoms if atom.type == 'n'][0]
+                if c_atom.idx == broken_amide_C_idx and n_atom.idx == broken_amide_N_idx:
+                    # skip angles that involve broken amide bonds
+                    n_angles_skipped += 1
+                continue
+
+            my_mol.angles.append(angle)
+
+        print(f'\t\tSkipped {n_angles_skipped} angles corresponding to broken amide bonds')
+
+        # loop through all dihedrals and assign to new molecules
+        n_dihedrals_skipped = 0
+        for dihedral in top.dihedrals: # this is all polymer dihedrals because water uses settles and monoatomic ions have no dihedrals
+            atom1, atom2, atom3, atom4 = dihedral.atoms
+            my_types = [a.type for a in dihedral.atoms]
+            my_mol = new_molecules[atom_to_new_resindex[atom1.idx]]
+
+            if 'c' in my_types and 'n' in my_types:
+                c_atom = [atom for atom in dihedral.atoms if atom.type == 'c'][0]
+                n_atom = [atom for atom in dihedral.atoms if atom.type == 'n'][0]
+                if c_atom.idx == broken_amide_C_idx and n_atom.idx == broken_amide_N_idx:
+                    # skip dihedrals that involve broken amide bonds
+                    n_dihedrals_skipped += 1
+                continue
+
+            my_mol.dihedrals.append(dihedral)
+
+        print(f'\t\tSkipped {n_dihedrals_skipped} dihedrals corresponding to broken amide bonds')
+
+        # add the water and ion molecules back
+        for mol in top.molecules:
+            if not mol.name.startswith('PA'):
+                new_molecules.append(mol)
+
+        # update topology molecules
+        top.molecules = new_molecules
+        
+        return top
+        
+
+    def get_global_atom_indices(self, universe, top, breaking_bonds=False):
+        '''Get global atom indices from universe'''
+
+        # reassign global atom indices to the GRO file
+        global_map = {}
+        new_idx = 0
+
+        # start with polymer atoms
+
+        if breaking_bonds: # use the top indices when breaking bonds but not when adding atoms
+            for mol in top.molecules[:-4]:  # last 4 molecules are non-polymer
+                for atom in mol.atoms:
+                    global_map[atom.idx] = new_idx
+                    new_idx += 1
+        else:
+            n_polymer_mols = len(top.molecules) - 4  # last 4 molecules are non-polymer
+            for i in range(n_polymer_mols):
+                polymer_res = universe.select_atoms(f'resname PA{i+1}')
+                for atom in polymer_res:
+                    global_map[atom.ix] = new_idx
+                    new_idx += 1
+
+        # then non-polymer atoms (first, waters)
+        for atom in universe.select_atoms('resname SOL'):
+            global_map[atom.ix] = new_idx
+            new_idx += 1
+
+        n_mols_NA_1 = top.molecules[-3].n_mols # NA molecules are split in topology, this is first set
+        for atom in universe.select_atoms('resname NA')[:n_mols_NA_1]:
+            global_map[atom.ix] = new_idx
+            new_idx += 1
+
+        # then Cl ions
+        for atom in universe.select_atoms('resname CL'):
+            global_map[atom.ix] = new_idx
+            new_idx += 1
+
+        # then all other Na ions
+        for atom in universe.select_atoms('resname NA')[n_mols_NA_1:]:
+            global_map[atom.ix] = new_idx
+            new_idx += 1
+
+        return global_map
+
+
+    def add_new_atoms_for_chlorination(self, n, c, Cl_position, O_position, H_position=None):
+        '''Add new Cl and OH atoms to the universe after breaking amide bonds'''
+
+        # create an empty universe for the newly placed atoms
+        if H_position is not None:
+            new_atom_resindices = np.array([n.resindex, c.resindex, c.resindex]) # add to the same residues as the broken amide N and C
+            n_added = 3
+            positions = np.vstack([Cl_position, O_position, H_position])
+            names = np.array(['Cl', 'O', 'H'])
+        else:
+            new_atom_resindices = np.array([n.resindex, c.resindex]) # add to the same residues as the broken amide N and C
+            n_added = 2
+            positions = np.vstack([Cl_position, O_position])
+            names = np.array(['Cl', 'O'])
+
+        new_atoms_u = mda.Universe.empty(
+            n_atoms=n_added,
+            n_residues=len(self.universe.residues),  # Don't create new residues, but use the existing residues
+            atom_resindex=new_atom_resindices,
+            trajectory=True
+        )
+
+        new_atoms_u.add_TopologyAttr('name', names)
+        new_atoms_u.add_TopologyAttr('type', names) # does not matter that these are not correct atomtypes
+        new_atoms_u.add_TopologyAttr('element', names)
+        new_atoms_u.add_TopologyAttr('resname', [res.resname for res in self.universe.residues])
+        new_atoms_u.add_TopologyAttr('resid', [res.resid for res in self.universe.residues])
+        new_atoms_u.atoms.positions = positions
+
+        # Merge with existing universe
+        merged_u = mda.Merge(self.universe.atoms, new_atoms_u.atoms)
+        merged_u.dimensions = self.universe.dimensions
+
+        print(f'\tOriginal number of atoms: {len(self.universe.atoms)}')
+        print(f'\tAdded {n_added} new atoms to existing residues')
+        print(f'\tTotal atoms: {len(merged_u.atoms)}')
+
+        return merged_u
+    
+
+    def update_topology_with_Cl(self, top, n, param_gro, param_top):
+        '''Get the bonded parameters and add them to the topology file'''
+
+        from gromacs_topology import Atom, Bond, Angle, Dihedral
+
+        # get representative atoms from parameterized fragment
+        cl = param_gro.universe.select_atoms('type cl')
+        cl_atom = param_top.atoms[cl.indices[0]]
+        nh_type = param_top.atomtypes['nh'] # broken amide N changes to type nh (amine N)
+
+        # add Cl to the N on broken amide bonds
+        total_atoms = len(self.universe.atoms)
+        n_top = top.atoms[n.index]
+
+        # pull most attributes from the parameterized fragment with Cl
+        atype = cl_atom.type
+        atomname = cl_atom.atomname
+        cgnr = cl_atom.cgnr
+        charge = cl_atom.charge
+        mass = cl_atom.mass
+        atomtype = cl_atom.atomtype
+
+        # pull other attributes from the current molecule
+        num = n_top.molecule.n_atoms + 1
+        resnum = n_top.resnum
+        resname = n_top.resname
+        molecule = n_top.molecule
+
+        # create new atom and add to molecule
+        new_atom_line = f'{num:7d} {atype:4s}\t\t{resnum} {resname:8s} {atomname:9s}\t{cgnr:d}\t{charge:.8f}\t{mass:.8f}\n'
+        new_atom = Atom(total_atoms, new_atom_line)
+        new_atom.atomtype = atomtype
+        new_atom.molecule = molecule
+        molecule.atoms.append(new_atom)
+
+        # change N atom type from 'n' to 'nh'
+        n_top.atomtype = nh_type
+        n_top.type = 'nh'
+
+        # add new bonds, angles, dihedrals to the molecule
+        nh_cl_bond = param_top.get_bond('nh', 'cl')
+        my_nh_cl_bond = Bond(new_atom, n_top, nh_cl_bond.type, nh_cl_bond._params)
+        molecule.bonds.append(my_nh_cl_bond)
+
+        hn_on_N = [a for a in n.bonded_atoms if a.type == 'hn'][0]
+        hn_top = top.atoms[hn_on_N.index]
+        hn_nh_cl_angle = param_top.get_angle('hn', 'nh', 'cl')
+        my_hn_nh_cl_angle = Angle(hn_top, n_top, new_atom, hn_nh_cl_angle.type, hn_nh_cl_angle._params)
+        molecule.angles.append(my_hn_nh_cl_angle)
+
+        ca_on_N = [a for a in n.bonded_atoms if a.type == 'ca'][0]
+        ca_top = top.atoms[ca_on_N.index]
+        ca_nh_cl_angle = param_top.get_angle('ca', 'nh', 'cl')
+        my_ca_nh_cl_angle = Angle(ca_top, n_top, new_atom, ca_nh_cl_angle.type, ca_nh_cl_angle._params)
+        molecule.angles.append(my_ca_nh_cl_angle)
+
+        for ang in n_top.angles:
+            a1, a2, a3 = ang.atoms
+            my_types = [a.type for a in ang.atoms]
+            print(my_types)
+
+            if Counter(my_types) == Counter(['ca', 'nh', 'hn']):
+                continue  # this improper is skipped in the moltemplate GAFF topology
+            
+            dih = param_top.get_dihedral(a1.type, a2.type, a3.type, new_atom.type)
+            my_dihedral = Dihedral(a1, a2, a3, new_atom, dih.type, dih._params)
+            molecule.dihedrals.append(my_dihedral)
+
+        print(f'\tAdded Cl atom to broken amide N atom index {n.index} as atom index {total_atoms}')
+        total_atoms += 1
+
+        return top, total_atoms
+    
+
+    def update_topology_with_O(self, top, c, total_atoms, param_gro, param_top, protonate=False):
+        '''Get the bonded parameters for the new O atom after breaking crosslinks and add them to the topology file'''
+
+        from gromacs_topology import Atom, Bond, Angle, Dihedral
+
+        term_c = param_gro.universe.select_atoms('(type c) and (not bonded type n)')
+        o = param_gro.universe.select_atoms('(type o) and (bonded group term_c)', term_c=term_c)
+        o_atom = param_top.atoms[o.indices[0]]
+        oh = param_gro.universe.select_atoms('type oh')
+        oh_atom = param_top.atoms[oh.indices[0]]
+
+        # add O to the C on broken amide bonds
+        my_C_top = top.atoms[c.index]
+
+        # add O atom
+        if protonate:
+            ref_atom = oh_atom
+        else:
+            ref_atom = o_atom
+
+        # pull most attributes from the parameterized fragment
+        atype = ref_atom.type
+        atomname = ref_atom.atomname
+        cgnr = ref_atom.cgnr
+        charge = ref_atom.charge
+        mass = ref_atom.mass
+        atomtype = ref_atom.atomtype
+
+        # pull other attributes from the current molecule
+        num = my_C_top.molecule.n_atoms + 1
+        resnum = my_C_top.resnum
+        resname = my_C_top.resname
+        molecule = my_C_top.molecule
+
+        # create new atom and add to molecule
+        new_atom_line = f'{num:7d} {atype:4s}\t\t{resnum} {resname:8s} {atomname:9s}\t{cgnr:d}\t{charge:.8f}\t{mass:.8f}\n'
+        new_atom = Atom(total_atoms, new_atom_line)
+        new_atom.atomtype = atomtype
+        new_atom.molecule = molecule
+        molecule.atoms.append(new_atom)
+
+        # add new bonds, angles, dihedrals to the molecule
+        b = param_top.get_bond('c', new_atom.type)
+        my_o_c_bond = Bond(new_atom, my_C_top, b.type, b._params)
+        molecule.bonds.append(my_o_c_bond)
+
+        new_angles = []
+        for b in my_C_top.bonds:
+            a1, a2 = b.atoms
+            angle = param_top.get_angle(a1.type, a2.type, new_atom.type)
+            my_angle = Angle(a1, a2, new_atom, angle.type, angle._params)
+            molecule.angles.append(my_angle)
+            new_angles.append(my_angle)
+
+        new_dihedrals = []
+        for ang in my_C_top.angles:
+            a1, a2, a3 = ang.atoms
+            my_types = [a.type for a in ang.atoms]
+
+            if Counter(my_types) == Counter(['c', 'o', 'ca']):
+                is_improper = True # this is an improper
+            else:
+                is_improper = False
+
+            dih = param_top.get_dihedral(a1.type, a2.type, a3.type, new_atom.type, is_improper=is_improper)
+            my_dihedral = Dihedral(a1, a2, a3, new_atom, dih.type, dih._params)
+            molecule.dihedrals.append(my_dihedral)
+            new_dihedrals.append(my_dihedral)
+
+        new_atom.bonds.append(my_o_c_bond)
+        new_atom.angles.extend(new_angles)
+        new_atom.dihedrals.extend(new_dihedrals)
+
+        # add them to C atom as well
+        my_C_top.bonds.append(my_o_c_bond)
+        my_C_top.angles.extend(new_angles)
+        my_C_top.dihedrals.extend(new_dihedrals)
+
+        print(f'\tAdded O atom to broken amide C atom index {c.index} as atom index {total_atoms}')
+        total_atoms += 1
+
+        return top, total_atoms
+
+
+    def update_topology_with_H(self, top, c, total_atoms, param_gro, param_top):
+        '''Get the bonded parameters for the new H atom after breaking crosslinks (only for protonated OH) and add them to the topology file'''
+
+        from gromacs_topology import Atom, Bond, Angle, Dihedral
+
+        ho = param_gro.universe.select_atoms('type ho')
+        ho_atom = param_top.atoms[ho.indices[0]]
+
+        # add H to the C on broken amide bonds
+        my_C_top = top.atoms[c.index]
+    
+        for b in my_C_top.bonds:
+            has_oh = len([a for a in b.atoms if a.type == 'oh']) == 1
+            if has_oh:
+                my_O_top = [a for a in b.atoms if a.type == 'oh'][0]
+        
+        # pull most attributes from the parameterized fragment
+        ref_atom = ho_atom
+        atype = ref_atom.type
+        atomname = ref_atom.atomname
+        cgnr = ref_atom.cgnr
+        charge = ref_atom.charge
+        mass = ref_atom.mass
+        atomtype = ref_atom.atomtype
+
+        # pull other attributes from the current molecule
+        num = my_C_top.molecule.n_atoms + 1
+        resnum = my_C_top.resnum
+        resname = my_C_top.resname
+        molecule = my_C_top.molecule
+
+        # create new atom and add to molecule
+        new_H_atom_line = f'{num:7d} {atype:4s}\t\t{resnum} {resname:8s} {atomname:9s}\t{cgnr:d}\t{charge:.8f}\t{mass:.8f}\n'
+        new_H_atom = Atom(total_atoms, new_H_atom_line)
+        new_H_atom.atomtype = atomtype
+        new_H_atom.molecule = molecule
+        molecule.atoms.append(new_H_atom)
+
+        # add new bonds, angles, dihedrals to the molecule
+        b = param_top.get_bond('oh', new_H_atom.type)
+        my_oh_ho_bond = Bond(my_O_top, new_H_atom, b.type, b._params)
+        molecule.bonds.append(my_oh_ho_bond)
+
+        for b in my_O_top.bonds:
+            a1, a2 = b.atoms
+            angle = param_top.get_angle(a1.type, a2.type, new_H_atom.type)
+            my_angle = Angle(a1, a2, new_H_atom, angle.type, angle._params)
+            molecule.angles.append(my_angle)
+
+        for ang in my_O_top.angles:
+            a1, a2, a3 = ang.atoms
+            dih = param_top.get_dihedral(a1.type, a2.type, a3.type, new_H_atom.type)
+            my_dihedral = Dihedral(a1, a2, a3, new_H_atom, dih.type, dih._params)
+            molecule.dihedrals.append(my_dihedral)
+            print(f'Added dihedral: {a1.idx}-{a2.idx}-{a3.idx}-{new_H_atom.idx}, {my_dihedral}')
+
+        print(f'\tAdded H atom to broken amide C atom index {c.index} as atom index {total_atoms}')
+        total_atoms += 1
+
+        print('\n\tTotal atoms in topology:', total_atoms)
+
+        return top, total_atoms
+
+
+    def reassign_charges_after_chlorination(self, top):
+        '''Reassign charges on atoms after chlorination by breaking polymer into its fragments'''
+
+        from monomer_classes import MPD, MPD_Cl_T, TMC
+
+        atoms = self.polymer
+
+        original_charges = atoms.charges
+
+        with open('charges_modified.yaml', 'r') as file: # read in charges from yaml file
+            charges_dict = yaml.safe_load(file)
+
+        print('\tCreating MPD monomer fragments...')
+        mpds = []
+        Ns = []
+        for N in tqdm(atoms.select_atoms('type n nh')):
+
+            has_cl = 'cl' in N.bonded_atoms.types
+
+            if not has_cl: # check other N
+                my_ca = [atom for atom in N.bonded_atoms if atom.type == 'ca'][0] # get connected aromatic C
+                next_ca = [atom for atom in my_ca.bonded_atoms if atom.type == 'ca'] # get next aromatic C
+                for ca in next_ca:
+                    next_next_ca = [atom for atom in ca.bonded_atoms if atom != my_ca and atom.type == 'ca'][0]
+                    if 'N' in next_next_ca.bonded_atoms.elements:
+                        n = [atom for atom in next_next_ca.bonded_atoms if atom.element == 'N'][0]
+                        break
+
+                has_cl = 'cl' in n.bonded_atoms.types
+
+            if has_cl:
+                mpd = MPD_Cl_T(N, cl='cl', xlink_n='n', ar_c='ca', term_n='nh', ar_h='ha', hn='hn')
+            else:
+                mpd = MPD(N, xlink_n='n', ar_c='ca', term_n='nh', ar_h='ha', hn='hn')
+
+            if mpd.N2 not in Ns:
+                mpd.assign_charges(charges_dict[mpd.name])
+                mpds.append(mpd)
+            
+            Ns.append(mpd.N1)
+            Ns.append(mpd.N2)
+
+        print('\tCreating TMC monomer fragments...')
+        tmcs = []
+        Cs = []
+        for C in tqdm(atoms.select_atoms('type c')):
+            tmc = TMC(C, ar_c='ca', xlink_c='c', ar_h='ha', deprot_o='o', prot_o='oh', ho_type='ho')
+            if tmc.C2 not in Cs and tmc.C3 not in Cs:
+                tmc.assign_charges(charges_dict[tmc.name])
+                tmcs.append(tmc)
+
+            Cs.append(tmc.C1)
+            Cs.append(tmc.C2)
+            Cs.append(tmc.C3)
+            
+        for atom in atoms: # assign new charges to top
+            idx = atom.index
+            top_atom = top.atoms[idx]
+            top_atom.charge = atom.charge
+
+        new_charges = atoms.charges
+        print('\n\tTotal charge before reassignment: {:.4f}'.format(original_charges.sum()))
+        print('\tTotal charge after reassignment: {:.4f}'.format(new_charges.sum()))
+        
+        return top
+
+
+    def calculate_charges_after_chlorination(self):
+        '''Calculate partial charges after chlorination by breaking polymer into its fragments'''
+
+        from monomer_classes import MPD, MPD_Cl_T, TMC
+
+        # read in original charges
+        with open('charges.yaml', 'r') as file:
+            charges_dict = yaml.safe_load(file)
+
+        atoms = self.universe.select_atoms(f'not type {self.ow_type} {self.hw_type} {self.anion_type} {self.cation_type}') # polymer atoms only
+
+        # get the number of each fragment
+        print('Creating MPD monomer fragments...')
+        mpds = []
+        Ns = []
+        for N in tqdm(atoms.select_atoms('type n nh')):
+
+            has_cl = 'cl' in N.bonded_atoms.types
+
+            if not has_cl: # check other N
+                my_ca = [atom for atom in N.bonded_atoms if atom.type == 'ca'][0] # get connected aromatic C
+                next_ca = [atom for atom in my_ca.bonded_atoms if atom.type == 'ca'] # get next aromatic C
+                for ca in next_ca:
+                    next_next_ca = [atom for atom in ca.bonded_atoms if atom != my_ca and atom.type == 'ca'][0]
+                    if 'N' in next_next_ca.bonded_atoms.elements:
+                        n = [atom for atom in next_next_ca.bonded_atoms if atom.element == 'N'][0]
+                        break
+
+                has_cl = 'cl' in n.bonded_atoms.types
+
+            if has_cl:
+                mpd = MPD_Cl_T(N, cl='cl', xlink_n='n', ar_c='ca', term_n='nh', ar_h='ha', hn='hn')
+            else:
+                mpd = MPD(N, xlink_n='n', ar_c='ca', term_n='nh', ar_h='ha', hn='hn')
+
+            if mpd.N2 not in Ns:
+                mpd.assign_charges(charges_dict[mpd.name])
+                mpds.append(mpd)
+            
+            Ns.append(mpd.N1)
+            Ns.append(mpd.N2)
+
+        print('Creating TMC monomer fragments...')
+        tmcs = []
+        Cs = []
+        for C in tqdm(atoms.select_atoms('type c')):
+            tmc = TMC(C, ar_c='ca', xlink_c='c', ar_h='ha', deprot_o='o', prot_o='oh', ho_type='ho')
+            if tmc.C2 not in Cs and tmc.C3 not in Cs:
+                tmc.assign_charges(charges_dict[tmc.name])
+                tmcs.append(tmc)
+
+            Cs.append(tmc.C1)
+            Cs.append(tmc.C2)
+            Cs.append(tmc.C3)
+
+
+        n_mpd_mono = len([mono for mono in mpds if mono.name == 'MPD'])
+        n_mpd_mono_Cl = len([mono for mono in mpds if mono.name in ['MPD_Cl_1', 'MPD_Cl_2']])
+        n_mpd_mono_2Cl = len([mono for mono in mpds if mono.name == 'MPD_2Cl'])
+        n_mpd_L = len([mono for mono in mpds if mono.name == 'MPD_L'])
+        n_mpd_T = len([mono for mono in mpds if mono.name == 'MPD_T'])
+        n_mpd_T_Cl = len([mono for mono in mpds if mono.name in ['MPD_T_Cl_1', 'MPD_T_Cl_2']])
+        n_tmc_mono = len([mono for mono in tmcs if mono.name == 'TMC'])
+        n_tmc_mono_0P = len([mono for mono in tmcs if mono.name == 'TMC_0P'])
+        n_tmc_mono_1P = len([mono for mono in tmcs if mono.name in ['TMC_1P_1', 'TMC_1P_2', 'TMC_1P_3']])
+        n_tmc_mono_2P = len([mono for mono in tmcs if mono.name in ['TMC_2P_1', 'TMC_2P_2', 'TMC_2P_3']])
+        n_tmc_mono_3P = len([mono for mono in tmcs if mono.name == 'TMC_3P'])
+        n_tmc_LD = len([mono for mono in tmcs if mono.name in ['TMC_L_D_1', 'TMC_L_D_2', 'TMC_L_D_3']])
+        n_tmc_LP = len([mono for mono in tmcs if mono.name in ['TMC_L_P_1', 'TMC_L_P_2', 'TMC_L_P_3']])
+        n_tmc_T0P = len([mono for mono in tmcs if mono.name in ['TMC_T_0P_1', 'TMC_T_0P_2', 'TMC_T_0P_3']])
+        n_tmc_T1P = len([mono for mono in tmcs if mono.name in ['TMC_T_1P_1_2', 'TMC_T_1P_1_3', 'TMC_T_1P_2_1', 'TMC_T_1P_2_3', 'TMC_T_1P_3_1', 'TMC_T_1P_3_2']])
+        n_tmc_T2P = len([mono for mono in tmcs if mono.name in ['TMC_T_2P_1', 'TMC_T_2P_2', 'TMC_T_2P_3']])
+        n_tmc_C = len([mono for mono in tmcs if mono.name == 'TMC_C'])
+
+        mpd_L = get_charge('MPD_L', charges_dict)
+        mpd_T = get_charge('MPD_T', charges_dict)
+        mpd_T_Cl = get_charge('MPD_T_Cl_1', charges_dict)
+        tmc_LD = get_charge('TMC_L_D_1', charges_dict)
+        tmc_LP = get_charge('TMC_L_P_1', charges_dict)
+        tmc_T0P = get_charge('TMC_T_0P_1', charges_dict)
+        tmc_T1P = get_charge('TMC_T_1P_1_2', charges_dict)
+        tmc_T2P = get_charge('TMC_T_2P_1', charges_dict)
+        tmc_C = get_charge('TMC_C', charges_dict)
+
+        print(f'\nMPD monomers: {n_mpd_mono + n_mpd_mono_Cl + n_mpd_mono_2Cl}')
+        print(f'MPD monomer: {n_mpd_mono} with charge: {n_mpd_mono*0:.4f}')
+        print(f'MPD monomer-Cl: {n_mpd_mono_Cl} with charge: {n_mpd_mono_Cl*0:.4f}')
+        print(f'MPD monomer-2Cl: {n_mpd_mono_2Cl} with charge: {n_mpd_mono_2Cl*0:.4f}')
+        print(f'MPD-L: {n_mpd_L} with charge: {n_mpd_L*mpd_L:.4f}')
+        print(f'MPD-T: {n_mpd_T} with charge: {n_mpd_T*mpd_T:.4f}')
+        print(f'MPD-T-Cl: {n_mpd_T_Cl} with charge: {n_mpd_T_Cl*mpd_T_Cl:.4f}')
+        print(f'\nTMC monomers: {n_tmc_mono + n_tmc_mono_0P + n_tmc_mono_1P + n_tmc_mono_2P + n_tmc_mono_3P}')
+        print(f'TMC monomer (0P): {n_tmc_mono_0P} with charge: {n_tmc_mono_0P*(-3):.4f}')
+        print(f'TMC monomer (1P): {n_tmc_mono_1P} with charge: {n_tmc_mono_1P*(-2):.4f}')
+        print(f'TMC monomer (2P): {n_tmc_mono_2P} with charge: {n_tmc_mono_2P*(-1):.4f}')
+        print(f'TMC monomer (3P): {n_tmc_mono_3P} with charge: {n_tmc_mono_3P*(0):.4f}')
+        print(f'TMC-L-D: {n_tmc_LD} with charge: {n_tmc_LD*tmc_LD:.4f}')
+        print(f'TMC-L-P: {n_tmc_LP} with charge: {n_tmc_LP*tmc_LP:.4f}')
+        print(f'TMC-T-0P: {n_tmc_T0P} with charge: {n_tmc_T0P*tmc_T0P:.4f}')
+        print(f'TMC-T-1P: {n_tmc_T1P} with charge: {n_tmc_T1P*tmc_T1P:.4f}')
+        print(f'TMC-T-2P: {n_tmc_T2P} with charge: {n_tmc_T2P*tmc_T2P:.4f}')
+        print(f'TMC-C: {n_tmc_C} with charge: {n_tmc_C*tmc_C:.4f}')
+
+        n_deprot = n_tmc_LD + n_tmc_T0P*2 + n_tmc_T1P
+        print(f'\nTotal number of deprotonated groups on polymer chains: {n_deprot}')
+        print(f'Charge after reassignment: {atoms.charges.sum()}')
+
+        # Set up system of equations to solve for new charges
+        # Note: this is solving for the total charge on each fragment, not per-atom charges
+        #
+        # Let the sum of the charges on a given fragment be represented as follows:
+        # MPD_L = m0, MPD_T = m1, MPD_T_Cl = m2, TMC_L_P = t1, TMC_L_D = t2, 
+        # TMC_T_0P = t3, TMC_T_1P = t4, TMC_T_2P = t5, TMC_C = t6
+        # 
+        # m0 = \sum{charges on MPD_L}, which we constrain to be exactly as in OpenEye
+        # m0 = 2*t5
+        # m1 = m2 + 0.03606 # this difference comes from the OpenEye charges for chlorinated and unchlorinated MPD-T
+        # 2*m1 = t1
+        # 3*m1 = t6
+        # t2 = t1 - 1
+        # t3 = t5 - 2
+        # t4 = t5 -1
+        # Total charge = -n_deprot 
+        # 
+        # This gives a system of 8 equations and 8 unknowns, which we represent as a matrix equation Ax = b
+        # where x = [m1, m2, t1, t2, t3, t4, t5, t6]
+
+        A = np.array([[0,  0,  0, 0, 0, 0,  2,  0],
+                    [1, -1,  0, 0, 0, 0,  0,  0],
+                    [2,  0, -1, 0, 0, 0,  0,  0],
+                    [3,  0,  0, 0, 0, 0,  0, -1],
+                    [0,  0, -1, 1, 0, 0,  0,  0],
+                    [0,  0,  0, 0, 1, 0, -1,  0],
+                    [0,  0,  0, 0, 0, 1, -1,  0],
+                    [n_mpd_T, n_mpd_T_Cl, n_tmc_LP, n_tmc_LD, n_tmc_T0P, n_tmc_T1P, n_tmc_T2P, n_tmc_C]])
+
+        b = np.array([[mpd_L],
+                    [0.03606],
+                    [0],
+                    [0],
+                    [-1],
+                    [-2],
+                    [-1],
+                    [-n_mpd_L*mpd_L - n_deprot]])
+
+        print('Solving system of equations for new fragment charges...')
+        x = np.linalg.solve(A, b)
+
+        # distribute the differences in charge evenly over the 6 aromatic carbons in each fragment
+        # dump to a new charges dict: charges_modified.yaml
+        diff = {}
+
+        frags = ['MPD_T', 'MPD_T_Cl', 'TMC_L_P', 'TMC_L_D', 'TMC_T_0P', 'TMC_T_1P', 'TMC_T_2P', 'TMC_C']
+        orig_charges = [mpd_T, mpd_T_Cl, tmc_LP, tmc_LD, tmc_T0P, tmc_T1P, tmc_T2P, tmc_C]
+        for frag, charge, orig in zip(frags,x,orig_charges):
+            d = (charge[0]-orig) / 6
+            for name in charges_dict:
+                if name.startswith(frag):
+                    diff[name] = d
+            
+            print(f'{frag} should have {charge[0]:.5f} charge for a difference of {d*6:.5f} from the original')
+            print(f'\tDivided evenly over 6 aromatic carbons: {d:.5f}')
+
+        for frag in charges_dict:
+            if frag in diff:
+                for atom in charges_dict[frag]:
+                    if atom.startswith('ca'):
+                        charges_dict[frag][atom]['charge'] = float(round(charges_dict[frag][atom]['charge'],8) + diff[frag])
+
+        with open('charges_modified.yaml', 'w') as f:
+            yaml.dump(charges_dict, f)
+
+        
+
+    def hydrolyzed_chlorination(self, target_crosslink_pct=0.8, radius_for_water_search=6, rng_seed=3, input_topology='PA_ions.top', param_fragment='2MPD_2TMC_1P_Cl', nproc=64):
+        '''Build hydrolyzed chlorination -- including removing waters, breaking amide bonds, adding Cl and OH groups, updating topology'''
+
+        from gromacs_topology import GromacsTopology
+
+        # save gmx exectutable
+        gmx = self.gmx
+
+        n_xlink = len(self.universe.select_atoms(f'type {self.xlink_n_type}'))
+        n_possible = len(self.universe.select_atoms(f'type {self.xlink_n_type} {self.term_n_type}'))
+        n_to_break = n_xlink - int(target_crosslink_pct * n_possible)
+
+        print(f'Going from {100 * n_xlink / n_possible:.1f}% crosslinking to {100 * (n_xlink - n_to_break) / n_possible:.1f}% crosslinking by breaking {n_to_break} amide bonds')         
+
+        # select random amides to break
+        amide_Ns = self.random_amides(n_to_break, seed=rng_seed).copy()
+        original_universe = self.universe.copy() # keep a copy of the original universe before modifying it
+
+        for i,n in enumerate(amide_Ns):
+
+            print()
+            print('-'*50)
+
+            c = original_universe.atoms.select_atoms(f'(type c) and (bonded index {n.index})')[0]
+            protonate = i < int(n_to_break/2) # protonate half of the COOH groups
+
+            print(f'Iteration {i+1}: breaking bond between N {n} and C {c}')
+
+            #################### REMOVE WATERS #####################
+
+            print('\n\tRemoving waters to make room for Cl and OH groups')
+            print('\tNumber of water molecules before breaking crosslink:', len(self.universe.select_atoms('resname SOL').residues))
+
+            # need to get the same N and C atom objects in the new universe
+            pos = n.position
+            my_ns = self.universe.select_atoms(f'(type n) and (bonded type c) and (point {pos[0]} {pos[1]} {pos[2]} 3)')
+            if len(my_ns) != 1:
+                raise ValueError(f'{len(my_ns)} amide Ns found near original amide N position', pos)
+            
+            my_n = my_ns[0]
+            my_c = self.universe.atoms.select_atoms(f'(type c) and (bonded index {my_n.index})')[0]
+
+            # remove nearby water molecules to add Cl and OH
+            Cl_position = self.remove_water_for_Cl(my_n, radius_for_water_search=radius_for_water_search, n_waters=4, tol=2)
+            if protonate:
+                O_position, H_position = self.remove_water_for_OH(my_c, Cl_position, radius_for_water_search=radius_for_water_search, protonate=True, n_waters=4, tol=2)
+            else:
+                O_position = self.remove_water_for_OH(my_c, Cl_position, radius_for_water_search=radius_for_water_search, protonate=False, n_waters=4, tol=2)
+
+            # reassign residue numbers after deleted waters
+            n_residues = len(self.atoms.residues)
+            resids = np.arange(1, n_residues+1)
+            self.universe.add_TopologyAttr('resid', list(resids))
+            self.universe.atoms.write('removed_waters.gro')
+            print('\tNumber of water molecules after breaking crosslink:', len(self.universe.select_atoms('resname SOL').residues))
+            print(f'\tWrote output to removed_waters.gro')
+
+            # update the topology file
+            top = GromacsTopology(input_topology, verbose=False)
+            water_mol = [mol for mol in top.molecules if mol.name == 'SOL'][0]
+            water_mol.n_mols = len(self.universe.select_atoms('resname SOL').residues) # all we have to do is update the number of water molecules
+            top.write('removed_waters.top')
+            print(f'\tWrote updated topology to removed_waters.top')
+
+            # reinitialize the class with removed water molecules
+            self.tpr = self._generate_tpr('removed_waters.top', 'removed_waters.gro', gmx=gmx(1))
+            self.__init__('removed_waters.gro', frmt='GRO', tpr_file=self.tpr, 
+                        xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+                        cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+                        anion_type=self.anion_type, cation_type=self.cation_type)
+
+            #################### BREAK BOND #####################
+
+            print(f'\n\tBreaking amide bond between N {n.index} and C {c.index}')
+
+            # need to get the same N and C atom objects in the new universe
+            pos = n.position
+            my_ns = self.universe.select_atoms(f'(type n) and (bonded type c) and (point {pos[0]} {pos[1]} {pos[2]} 3)')
+            if len(my_ns) != 1:
+                raise ValueError(f'{len(my_ns)} amide Ns found near original amide N position', pos)
+            
+            my_n = my_ns[0]
+            my_c = self.universe.atoms.select_atoms(f'(type c) and (bonded index {my_n.index})')[0]
+
+            # delete the bonds and create graphs to determine new molecules
+            print('\n\tNumber of polymer bonds before breaking crosslink:', len(self.universe.bonds))
+            to_delete = [b for b in my_n.bonds if 'c' in b.atoms.types]
+            print('\tDeleting bond(s):', to_delete)
+            self.universe.delete_bonds(to_delete)
+            self.create_polymer_graphs()
+            n_components = [nx.number_connected_components(g) for g in self.polymer_graphs]
+            print('\tNumber of polymer bonds after breaking crosslink:', len(self.universe.bonds))
+            print('\tNumber of polymer chains after breaking crosslink:', sum(n_components))
+
+            # reassign residue indices
+            atom_to_new_resindex, new_resindex_to_atom = self.reassign_residue_indices()
+            self.universe.atoms.write('broken_bonds.gro')
+            print('\tWrote output to broken_bonds.gro')
+
+            # update the topology file
+            # Note: my GromacsTopology class writes out only using the molecules, so it should be fine if we update all the molecule information
+            top = GromacsTopology('removed_waters.top', verbose=False)
+            top = self.update_topology_after_breaking_bond(top, my_n, my_c, new_resindex_to_atom, atom_to_new_resindex)
+            top.write('broken_bonds.top')
+            print(f'\tWrote updated topology to broken_bonds.top')
+
+            # reassign global atom indices to the GRO file
+            tmp_u = mda.Universe('broken_bonds.gro')
+            global_map = self.get_global_atom_indices(tmp_u, top, breaking_bonds=True)
+            tmp_u.add_TopologyAttr('ids', [global_map[atom.ix] for atom in tmp_u.atoms])
+            tmp_u.atoms.sort('ids').write('broken_bonds_sorted.gro')
+            print('\tWrote sorted output to broken_bonds_sorted.gro')
+
+            # reinitialize the class with broken bonds
+            self.tpr = self._generate_tpr('broken_bonds.top', 'broken_bonds_sorted.gro', gmx=gmx(1))
+            # self._run(f'{gmx(nproc)} mdrun -s {self.tpr} -deffnm broken_bonds_em_iter{i+1}')
+
+            # self.tpr = self._generate_tpr(f'broken_bonds.top', f'broken_bonds_em_iter{i+1}.gro', mdp='nvt_broken_bonds.mdp', tpr=f'broken_bonds_nvt_iter{i+1}.tpr', gmx=gmx(1), flags={'maxwarn' : 1})
+            # self._run(f'{gmx(nproc)} mdrun -s {self.tpr} -deffnm broken_bonds_nvt_iter{i+1}')
+
+            # self.__init__('broken_bonds_nvt_iter1.gro', frmt='GRO', tpr_file=self.tpr, 
+            #             xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+            #             cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+            #             anion_type=self.anion_type, cation_type=self.cation_type)
+
+            self.__init__('broken_bonds_sorted.gro', frmt='GRO', tpr_file=self.tpr, 
+                        xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+                        cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+                        anion_type=self.anion_type, cation_type=self.cation_type)
+
+
+            #################### ADD Cl and O(H) #####################
+
+            print(f'\n\tAdding Cl and O(H) groups to positions previously occupied by waters')
+
+            # need to get the same N and C atom objects in the new universe
+            pos = n.position
+            my_ns = self.universe.select_atoms(f'(type n) and (not bonded type c) and (point {pos[0]} {pos[1]} {pos[2]} 4)')
+            if len(my_ns) != 1:
+                raise ValueError(f'{len(my_ns)} amide Ns found near original amide N position', pos)
+            
+            pos = c.position
+            my_Cs = self.universe.select_atoms(f'(type c) and (not bonded type n) and (point {pos[0]} {pos[1]} {pos[2]} 4)')
+            if len(my_Cs) != 1:
+                raise ValueError(f'{len(my_Cs)} broken amide Cs found near original amide C position', pos)
+
+            my_n = my_ns[0]
+            my_c = my_Cs[0]
+
+            # add new atoms to GRO file
+            if protonate:
+                merged_u = self.add_new_atoms_for_chlorination(my_n, my_c, Cl_position, O_position, H_position=H_position)
+            else:
+                merged_u = self.add_new_atoms_for_chlorination(my_n, my_c, Cl_position, O_position)
+
+            merged_u.atoms.write('added_atoms.gro')
+            print('\tWrote output to added_atoms.gro')
+
+            # Get bonded parameters for new bonds from the parameter topology
+            param_gro = PolymAnalysis(f'{param_fragment}_box.gro', frmt='GRO', tpr_file=f'{param_fragment}_converted.tpr', 
+                                    xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+                                    cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+                                    anion_type=self.anion_type, cation_type=self.cation_type)
+            param_top = GromacsTopology(f'{param_fragment}_converted.top')
+
+            # update the topology file with new atoms and bonded parameters
+            top = GromacsTopology('broken_bonds.top', verbose=False)
+            top, total_atoms = self.update_topology_with_Cl(top, my_n, param_gro, param_top)
+
+            if protonate:  # only protonated half of the COOH groups
+                top, total_atoms = self.update_topology_with_O(top, my_c, total_atoms, param_gro, param_top, protonate=True)
+                top, total_atoms = self.update_topology_with_H(top, my_c, total_atoms, param_gro, param_top)
+            else:
+                top, total_atoms = self.update_topology_with_O(top, my_c, total_atoms, param_gro, param_top, protonate=False)
+            
+            top.write('added_atoms.top')
+            print(f'\tWrote updated topology to added_atoms.top')
+
+            # reassign global atom indices to the GRO file
+            tmp_u = mda.Universe('added_atoms.gro')
+            global_map = self.get_global_atom_indices(tmp_u, top, breaking_bonds=False)
+            tmp_u.add_TopologyAttr('ids', [global_map[atom.ix] for atom in tmp_u.atoms])
+            tmp_u.atoms.sort('ids').write('added_atoms_sorted.gro')
+            print('\tWrote sorted output to added_atoms_sorted.gro')
+
+            # reinitialize the class with added chlorination atoms
+            self.tpr = self._generate_tpr('added_atoms.top', 'added_atoms_sorted.gro', flags={'maxwarn' : 2}, gmx=gmx(1))
+            self.__init__('added_atoms_sorted.gro', frmt='GRO', tpr_file=self.tpr, 
+                        xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+                        cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+                        anion_type=self.anion_type, cation_type=self.cation_type)
+
+            #################### REASSIGN CHARGES #####################
+
+            print(f'\n\tReassigning charges after chlorination')
+
+            top = GromacsTopology('added_atoms.top', verbose=False)
+            self.calculate_charges_after_chlorination() # this creates a charges_modified.yaml file that has the new charges to assign
+            top = self.reassign_charges_after_chlorination(top)
+            top.write('recharged.top')
+            print(f'\tWrote recharged topology to recharged.top')
+
+            # reinitialize the class with correct charges on polymer
+            self.tpr = self._generate_tpr('recharged.top', 'added_atoms_sorted.gro', flags={'maxwarn' : 1}, gmx=gmx(1))
+            self.__init__('added_atoms_sorted.gro', frmt='GRO', tpr_file=self.tpr, 
+                        xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+                        cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+                        anion_type=self.anion_type, cation_type=self.cation_type)
+
+            added_atom = self.universe.select_atoms(f'(type {self.oh_type}) and (point {O_position[0]} {O_position[1]} {O_position[2]} 1)')
+            print(f'\n\tAdded O atom: {added_atom[0]}')
+            dists = distances.distance_array(added_atom, self.universe.atoms-added_atom, box=self.universe.dimensions)
+            print(f'\tClosest distances to other atoms: {dists[dists < 3]}')
+
+            self._run(f'cp recharged.top final_iter{i+1}.top')
+
+            #################### ADD ADDITIONAL IONS #####################
+
+            if not protonate:
+                print(f'\n\tAdding additional ions to neutralize system after chlorination')
+                self.insert_ions(n_cations=1, cation_name='NA', cation_charge=1, top=f'final_iter{i+1}.top', output=f'final_iter{i+1}.gro')
+            else:
+                self._run(f'cp added_atoms_sorted.gro final_iter{i+1}.gro')
+
+            #################### RUN MINIMIZATION #####################
+            
+            print(f'\n\tRunning energy minimization after chlorination')
+
+            self.tpr = self._generate_tpr(f'final_iter{i+1}.top', f'final_iter{i+1}.gro', gmx=gmx(1)) 
+            self._run(f'{gmx(nproc)} mdrun -s {self.tpr} -deffnm em_iter{i+1}')
+
+            # turn off Cl and OH nonbonded interactions by setting their epsilon to zero and charge to zero
+            top = GromacsTopology(f'final_iter{i+1}.top', verbose=False)
+
+            top_c = top.atoms[my_c.index]
+            top_n = top.atoms[my_n.index]
+
+            # create new atom types with epsilon = 0
+            added_types = ['oh', 'ho', 'o', 'c', 'nh', 'cl']
+            for atype in added_types:
+                top.atomtypes[f'{atype}_off'] = top.atomtypes[atype].copy()
+                top.atomtypes[f'{atype}_off'].type = f'{atype}_off'
+                top.atomtypes[f'{atype}_off'].bondingtype = f'{atype}_off'
+                top.atomtypes[f'{atype}_off'].epsilon = 0
+
+            # turn off for c, o, oh, ho
+            top_c.type = top_c.type + '_off'
+            top_c.charge = 0
+            for bond in top_c.bonds:
+                for a in bond.atoms:
+                    if a.type in ['c_off', 'ca']:
+                        continue
+
+                    a.type = a.type + '_off'
+                    a.charge = 0
+
+                    if a.type == 'oh_off':
+                        oh_ho_bond = [b for b in a.bonds if 'ho' in [b.atoms[0].type, b.atoms[1].type]][0]
+                        ho_atom = [atom for atom in oh_ho_bond.atoms if atom.type == 'ho'][0]
+                        ho_atom.type = ho_atom.type + '_off'
+                        ho_atom.charge = 0
+            
+            # turn off for n, cl
+            top_n.type = top_n.type + '_off'
+            top_n.charge = 0
+            n_cl_bond = [b for b in top_n.bonds if 'cl' in [b.atoms[0].type, b.atoms[1].type]][0]
+            cl_atom = [atom for atom in n_cl_bond.atoms if atom.type == 'cl'][0]
+            cl_atom.type = cl_atom.type + '_off'
+            cl_atom.charge = 0
+
+            top.write(f'final_iter{i+1}_nonbonded_off.top')
+
+            # self.tpr = self._generate_tpr(f'final_iter{i+1}_nonbonded_off.top', f'final_iter{i+1}.gro', mdp='nvt_nonbonded_off.mdp', tpr=f'nvt1_iter{i+1}.tpr', gmx=gmx(1), flags={'maxwarn' : 1})
+            self.tpr = self._generate_tpr(f'final_iter{i+1}_nonbonded_off.top', f'em_iter{i+1}.gro', mdp='nvt_nonbonded_off.mdp', tpr=f'nvt1_iter{i+1}.tpr', gmx=gmx(1), flags={'maxwarn' : 1}) # note this creates a charged system so need maxwarn
+            self._run(f'{gmx(nproc)} mdrun -s {self.tpr} -deffnm nvt1_iter{i+1}')
+
+            # turn vdW interactions back on
+            top = GromacsTopology(f'final_iter{i+1}.top', verbose=False)
+
+            top_c = top.atoms[my_c.index]
+            top_n = top.atoms[my_n.index]
+
+            # turn off charge for c, o, oh, ho
+            top_c.charge = 0
+            for bond in top_c.bonds:
+                for a in bond.atoms:
+                    if a.type in ['c', 'ca']:
+                        continue
+
+                    a.charge = 0
+
+                    if a.type == 'oh':
+                        oh_ho_bond = [b for b in a.bonds if 'ho' in [b.atoms[0].type, b.atoms[1].type]][0]
+                        ho_atom = [atom for atom in oh_ho_bond.atoms if atom.type == 'ho'][0]
+                        ho_atom.charge = 0
+            
+            # turn off charge for n, cl
+            top_n.charge = 0
+            n_cl_bond = [b for b in top_n.bonds if 'cl' in [b.atoms[0].type, b.atoms[1].type]][0]
+            cl_atom = [atom for atom in n_cl_bond.atoms if atom.type == 'cl'][0]
+            cl_atom.charge = 0
+
+            top.write(f'final_iter{i+1}_charges_off.top')
+
+            self.tpr = self._generate_tpr(f'final_iter{i+1}_charges_off.top', f'nvt1_iter{i+1}.gro', mdp='nvt_no_constraints.mdp', tpr=f'nvt2_iter{i+1}.tpr', gmx=gmx(1), flags={'maxwarn' : 1})
+            self._run(f'{gmx(nproc)} mdrun -s {self.tpr} -deffnm nvt2_iter{i+1}')
+
+            # turn charges back on
+            self.tpr = self._generate_tpr(f'final_iter{i+1}.top', f'nvt2_iter{i+1}.gro', mdp='nvt.mdp', tpr=f'nvt3_iter{i+1}.tpr', gmx=gmx(1))
+            self._run(f'{gmx(nproc)} mdrun -s {self.tpr} -deffnm nvt3_iter{i+1}')
+
+            # self.tpr = self._generate_tpr(f'final_iter{i+1}.top', f'nvt2_iter{i+1}.gro', mdp='npt.mdp', tpr=f'npt_iter{i+1}.tpr', gmx=gmx(1))
+            # self._run(f'{gmx(nproc)} mdrun -s {self.tpr} -deffnm npt_iter{i+1}')
+
+            # reinitialize the class with minimized structure
+            self.__init__(f'nvt3_iter{i+1}.gro', frmt='GRO', tpr_file=self.tpr, 
+                        xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
+                        cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+                        anion_type=self.anion_type, cation_type=self.cation_type)
+
+            input_topology = f'final_iter{i+1}.top'
+
+            break
+            
+
+    def insert_ions(self, n_anions=0, anion_name=None, anion_charge=-1, n_cations=0, cation_name=None, cation_charge=1, top='PA_ions.top', output='PA_ions.gro'):
         '''Insert ions with gmx genion'''
+
+        # first, write an ndx file with the water selection
+        waters = self.universe.select_atoms(f'type {self.ow_type} {self.hw_type}')
+        waters.write('waters.ndx', name='SOL')
 
         if cation_name is None and anion_name is None:
             raise TypeError('No ions given. Please provide an anion, cation, or both.')
         elif cation_name is None:
-            cmd = f'echo {water_sel} | {self.gmx} genion -s {self.tpr} -p {top} -o {output} -nn {n_anions} -nname {anion_name} -nq {anion_charge}'
+            cmd = f'{self.gmx} genion -s {self.tpr} -p {top} -o {output} -nn {n_anions} -nname {anion_name} -nq {anion_charge} -n waters.ndx'
             self._run(cmd)
         elif anion_name is None:
-            cmd = f'echo {water_sel} | {self.gmx} genion -s {self.tpr} -p {top} -o {output} -np {n_cations} -pname {cation_name} -pq {cation_charge}'
+            cmd = f'{self.gmx} genion -s {self.tpr} -p {top} -o {output} -np {n_cations} -pname {cation_name} -pq {cation_charge} -n waters.ndx'
             self._run(cmd)
         else:
-            cmd = f'echo {water_sel} | {self.gmx} genion -s {self.tpr} -p {top} -o {output} -nn {n_anions} -nname {anion_name} -nq {anion_charge} -np {n_cations} -pname {cation_name} -pq {cation_charge}'
+            cmd = f'{self.gmx} genion -s {self.tpr} -p {top} -o {output} -nn {n_anions} -nname {anion_name} -nq {anion_charge} -np {n_cations} -pname {cation_name} -pq {cation_charge} -n waters.ndx'
             self._run(cmd)
 
         # reinitialize the class with updated ions
         self._generate_tpr(top, output, tpr=self.tpr, gmx=self.gmx, flags={'maxwarn' : 1})
         self.__init__(output, frmt='GRO', tpr_file=self.tpr, 
                       xlink_c=self.xlink_c_type, xlink_n=self.xlink_n_type, term_n=self.term_n_type,
-                      cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type)
-
+                      cl_type=self.cl_type, oh_type=self.oh_type, ow_type=self.ow_type, hw_type=self.hw_type,
+                      anion_type=self.anion_type, cation_type=self.cation_type)
 
     def calculate_density(self, atom_group='all', box=False):
         '''Calculate density of a selection of the polymer membrane'''
@@ -1758,6 +2976,10 @@ class Settings:
         pass
 
 
+def get_charge(frag, charges_dict):
+    return round(np.sum([charges_dict[frag][atom]['charge'] for atom in charges_dict[frag]]),8)
+
+
 # CPK color scheme
 cpk_colors = {
     'H': '#FFFFFF', 'C': '#000000', 'N': '#3050F8', 'O': '#FF0D0D',
@@ -1795,6 +3017,95 @@ def build_graph_from_atoms(atom_group : mda.core.groups.AtomGroup, color_scheme 
         G.add_edge(atom1.index, atom2.index, weight=distance)
     
     return G
+
+
+def solve_for_OH_position(O_position, C_position, CA_position, theta, d, h_dist=0.96):
+    """
+    Solve for the two possible positions of OH atom given the surrounding atoms O, C, and CA 
+    and the force field angle and distance paramters
+
+    OH     O
+      \   //
+        C
+        |
+        CA
+
+    O_position, C_position, CA_position: 3D points as (3,) numpy arrays
+    theta: angle at C (degrees)
+    d: desired distance C-OH
+    normal: vector defining the plane of rotation (will be normalized)
+    
+    Returns: C1, C2 (two possible solutions for C)
+    """
+
+    # save as numpy arrays
+    theta = np.radians(theta)
+    A = np.asarray(O_position, dtype=float)
+    B = np.asarray(C_position, dtype=float)
+    D = np.asarray(CA_position, dtype=float)
+    
+    # Unit vector BA
+    BA = A - B
+    BA = BA / np.linalg.norm(BA)
+    
+    # Compute plane normal from points A, B, D
+    normal = np.cross(A - B, D - B)
+    normal = normal / np.linalg.norm(normal)
+    
+    # Perpendicular direction in the plane (perp to BA but in ABD plane)
+    perp = np.cross(normal, BA)
+    perp = perp / np.linalg.norm(perp)
+    
+    # Rotate BA by ±theta in the plane spanned by (BA, perp)
+    C1_dir = BA * np.cos(theta) + perp * np.sin(theta)
+    # C2_dir = BA * np.cos(theta) - perp * np.sin(theta)
+    
+    # Scale to distance d and translate from B
+    C1 = B + d * C1_dir
+    # C2 = B + d * C2_dir
+
+    def h_for_o(o_pos):
+        vec_to_A = A - o_pos
+        sign = np.dot(normal, vec_to_A)
+        if sign > 0:
+            h_dir = -normal
+        else:
+            h_dir = normal
+        return o_pos + h_dist * h_dir
+
+    H1 = h_for_o(C1)
+    # H2 = h_for_o(C2)    
+    
+    return C1, H1
+
+
+def solve_for_Cl_position(N_position, H_position,  d):
+    """
+    Solve for the position of Cl atom given the surrounding atoms N, H
+    and the force field distance paramters -- place it along the N-H vector in the opposite direction
+
+    H - N - Cl
+        |
+        C
+
+    N_position, H_position: 3D points as (3,) numpy arrays
+    d: desired distance N-Cl
+    
+    Returns: C
+    """
+
+    # save as numpy arrays
+    A = np.asarray(H_position, dtype=float)
+    B = np.asarray(N_position, dtype=float)
+    
+    # Unit vector BA
+    BA = A - B
+    BA = BA / np.linalg.norm(BA)
+    
+    # Scale to distance d and translate from B
+    C = B + d * BA
+
+    return C
 
 
 if __name__ == '__main__':

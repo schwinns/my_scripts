@@ -3188,7 +3188,7 @@ def build_graph_from_atoms(atom_group : mda.core.groups.AtomGroup, color_scheme 
 
 def solve_for_OH_position(O_position, C_position, CA_position, theta, d, h_dist=0.96):
     """
-    Solve for the two possible positions of OH atom given the surrounding atoms O, C, and CA 
+    Solve for one of the two possible positions of OH atom given the surrounding atoms O, C, and CA 
     and the force field angle and distance paramters
 
     OH     O
@@ -3200,9 +3200,9 @@ def solve_for_OH_position(O_position, C_position, CA_position, theta, d, h_dist=
     O_position, C_position, CA_position: 3D points as (3,) numpy arrays
     theta: angle at C (degrees)
     d: desired distance C-OH
-    normal: vector defining the plane of rotation (will be normalized)
-    
-    Returns: C1, C2 (two possible solutions for C)
+    theta: angle between O-C-O (degrees)
+
+    Returns: C1, H1 (one possible solution for C and H)
     """
 
     # save as numpy arrays

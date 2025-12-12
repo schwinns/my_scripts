@@ -6,12 +6,19 @@ import matplotlib.pyplot as plt
 from natsort import natsorted
 import numpy as np
 import pandas as pd
+import pickle
 from tqdm import tqdm
 
 import MDAnalysis as mda
 from ParallelMDAnalysis import ParallelInterRDF as InterRDF
 from MDAnalysis.analysis.hydrogenbonds.hbond_analysis import HydrogenBondAnalysis as HBA
 from diffusion_coefficient import DiffusionCoefficient
+
+
+def save_object(obj, filename):
+    '''Save object to pickle file'''
+    with open(filename, 'wb') as output:
+        pickle.dump(obj, output, pickle.HIGHEST_PROTOCOL)
 
 
 def hydrogen_bonds(universe):
@@ -74,7 +81,8 @@ def calculate_RDFs(universe, membrane_lower_bound=43, membrane_upper_bound=99, n
     coo_c = universe.select_atoms('(type c) and (not bonded type n) and (not bonded type oh)')
     coo_o = universe.select_atoms('(type o) and (bonded group coo_c)', coo_c=coo_c)
     amide_n = universe.select_atoms('(type n) and (bonded type c)')
-    amide_o = universe.select_atoms('(type o) and (bonded type n)')
+    amide_c = universe.select_atoms('(type c) and (bonded type n)')
+    amide_o = universe.select_atoms('(type o) and (bonded group amide_c)', amide_c=amide_c)
     amine_n = universe.select_atoms('type nh')
 
     groups = [waters_in_membrane, polymer, polymer.select_atoms('not element H'), cl, cations, 
@@ -112,71 +120,178 @@ def average_PSD(frames):
     return bins, psd_mean, psd_std
 
 
+def calculate_density(universe, membrane_lb=40, membrane_ub=100, frameby=10, bin_width=0.5):
+    '''Calculate density profiles for different species and average density of bulk membrane'''
+
+    dim = 'z' # z-dimension
+    d = 2
+    box = universe.dimensions[d]
+
+    water = universe.select_atoms('resname SOL')
+    polymer = universe.select_atoms('resname PA*')
+
+    n_bins = int(box / bin_width)
+    bins = np.linspace(0, box, num=n_bins)
+
+    water_density_profile = np.zeros(n_bins-1)
+    polymer_density_profile = np.zeros(n_bins-1)
+    water_density = np.zeros(len(universe.trajectory[::frameby]))
+    total_density = np.zeros(len(universe.trajectory[::frameby]))
+
+    for i, ts in enumerate(tqdm(universe.trajectory[::frameby])):
+
+        sel = universe.select_atoms(f'prop {dim} > {membrane_lb} and prop {dim} < {membrane_ub}')
+
+        # calculate density profiles
+        box = universe.dimensions
+        for b in range(n_bins-1):
+            lb = bins[b]
+            ub = bins[b+1]
+
+            box_dims = [box[i] for i in range(3) if i != d]
+            dV = box_dims[0] * box_dims[1] * (ub-lb) * (10**-8)**3
+            
+            bin_atoms = universe.select_atoms(f'prop {dim} > {lb} and prop {dim} < {ub} and group water', water=water)
+            mass = bin_atoms.masses.sum() / 6.022 / 10**23
+            water_density_profile[b] += mass / dV
+
+            bin_atoms = universe.select_atoms(f'prop {dim} > {lb} and prop {dim} < {ub} and group polymer', polymer=polymer)
+            mass = bin_atoms.masses.sum() / 6.022 / 10**23
+            polymer_density_profile[b] += mass / dV
+
+        # calculate the water density in the bulk region as a time series
+        g = sel.select_atoms('resname SOL')
+        xlo, xhi = g.positions[:,0].min(), g.positions[:,0].max() # NOTE: these limits will be slightly different than self.box
+        ylo, yhi = g.positions[:,1].min(), g.positions[:,1].max() #       since it is using the min and max atom coordinates, but
+        zlo, zhi = g.positions[:,2].min(), g.positions[:,2].max() #       the difference should only be at most 0.002
+
+        total_mass = g.masses.sum() / 6.022 / 10**23 # [g/mol * mol/# = g]
+        s1 = (xhi-xlo) * 10**-8 # [Ang * 10^8 cm/Ang = cm]
+        s2 = (yhi-ylo) * 10**-8 # cm
+        s3 = (zhi-zlo) * 10**-8 # cm
+        vol = s1*s2*s3 # cm^3
+        density = total_mass / vol
+        water_density[i] = density
+
+        # calculate the total density in the bulk region as a time series
+        g = sel
+        xlo, xhi = g.positions[:,0].min(), g.positions[:,0].max() # NOTE: these limits will be slightly different than self.box
+        ylo, yhi = g.positions[:,1].min(), g.positions[:,1].max() #       since it is using the min and max atom coordinates, but
+        zlo, zhi = g.positions[:,2].min(), g.positions[:,2].max() #       the difference should only be at most 0.002
+
+        total_mass = g.masses.sum() / 6.022 / 10**23 # [g/mol * mol/# = g]
+        s1 = (xhi-xlo) * 10**-8 # [Ang * 10^8 cm/Ang = cm]
+        s2 = (yhi-ylo) * 10**-8 # cm
+        s3 = (zhi-zlo) * 10**-8 # cm
+        vol = s1*s2*s3 # cm^3
+        density = total_mass / vol
+        total_density[i] = density
+
+    water_density_profile = water_density_profile / len(universe.trajectory[::frameby])
+    polymer_density_profile = polymer_density_profile / len(universe.trajectory[::frameby])
+
+    return bins, water_density_profile, polymer_density_profile, water_density, total_density
+
+
 if __name__ == "__main__":
 
+    analysis_to_run = {'hydrogen_bonds': True,
+                       'volume' : True,
+                       'rdfs': True,
+                       'diffusion_coefficient': True,
+                       'pore_size_distribution': True,
+                       'density_profiles': True}
     path = './'
     tpr = path + 'prod.tpr'
     xtc = path + 'prod_centered.xtc'
 
     print(f'Loading {tpr} with trajectory {xtc}')
     u = mda.Universe(tpr, xtc)
+    dt = u.trajectory[1].time - u.trajectory[0].time
+    time = np.arange(0, u.trajectory.n_frames*dt, dt)  # ps
 
     # calculate percentage of hydrogen bonds over time
-    print('\nCalculating hydrogen bonds')
-    hbonds_count = hydrogen_bonds(u)
+    if analysis_to_run['hydrogen_bonds']:
+        print('\nCalculating hydrogen bonds')
+        hbonds_count = hydrogen_bonds(u)
 
-    total_hn = u.select_atoms('type hn').n_atoms
-    hbonds_percentage = (hbonds_count / total_hn) * 100
+        total_hn = u.select_atoms('type hn').n_atoms
+        hbonds_percentage = (hbonds_count / total_hn) * 100
 
-    # save both count and percentage (two columns) to CSV
-    hbonds_csv = path + 'hbonds.csv'
-    hbonds_out = np.column_stack((hbonds_count, hbonds_percentage))
-    np.savetxt(hbonds_csv, hbonds_out, delimiter=',', header='hbonds_count,hbonds_percentage', comments='', fmt='%.6f')
-    print(f'Wrote hbonds count and percentage to {hbonds_csv}')
+        # save both count and percentage (two columns) to CSV
+        hbonds_csv = path + 'hbonds.csv'
+        hbonds_out = np.column_stack((time, hbonds_count, hbonds_percentage))
+        np.savetxt(hbonds_csv, hbonds_out, delimiter=',', header='time,hbonds_count,hbonds_percentage', comments='', fmt='%.6f')
+        print(f'Wrote hbonds count and percentage to {hbonds_csv}')
 
-    print(f'{hbonds_percentage.mean():.2f}% out of {total_hn} possible hydrogen bonds')
+        print(f'{hbonds_percentage.mean():.2f}% out of {total_hn} possible hydrogen bonds')
     
-    # calculate the volume over time
-    print('\nCalculating bulk membrane volume')
-    volume, xy_area, membrane_bounds = calculate_volume(u)
+    if analysis_to_run['volume']:
+        # calculate the volume over time
+        print('\nCalculating bulk membrane volume')
+        volume, xy_area, membrane_bounds = calculate_volume(u)
 
-    # save to CSV
-    volume_csv = path + 'membrane_volume.csv'
-    np.savetxt(volume_csv, volume, delimiter=',', header='membrane_volume_A3', comments='', fmt='%.6f')
-    print(f'Wrote membrane volume to {volume_csv}')
+        # save to CSV
+        volume_csv = path + 'membrane_volume.csv'
+        vol_out = np.column_stack((time, volume))
+        np.savetxt(volume_csv, vol_out, delimiter=',', header='time,membrane_volume_A3', comments='', fmt='%.6f')
+        print(f'Wrote membrane volume to {volume_csv}')
 
-    print(f'Average membrane volume: {volume.mean():.2f} A^3')
+        print(f'Average membrane volume: {volume.mean():.2f} A^3')
 
-    # calculate RDFs
-    print('\nCalculating RDFs for water in membrane')
-    rdfs = calculate_RDFs(u, membrane_lower_bound=membrane_bounds[:,1].mean(), membrane_upper_bound=membrane_bounds[:,3].mean(), njobs=16)
+    if analysis_to_run['rdfs']:
+        # calculate RDFs
+        print('\nCalculating RDFs for water in membrane')
+        rdfs = calculate_RDFs(u, membrane_lower_bound=membrane_bounds[:,0].mean(), membrane_upper_bound=membrane_bounds[:,1].mean(), njobs=16)
 
-    # save to CSV
-    rdfs_csv = path + 'rdfs.csv'
-    rdfs.to_csv(rdfs_csv, index=False)
-    print(f'Wrote RDFs to {rdfs_csv}')
+        # save to CSV
+        rdfs_csv = path + 'rdfs.csv'
+        rdfs.to_csv(rdfs_csv, index=False)
+        print(f'Wrote RDFs to {rdfs_csv}')
 
-    # calculate MSDs and diffusion coefficients
-    print('\nCalculating water MSD and diffusion coefficients in membrane')
-    diff = DiffusionCoefficient(tpr, xtc)
-    frac, waters = diff.restrict_to_membrane(diff.water, membrane_fraction=(0.25, 0.75))
-    D, D_ci = diff.run(waters, n_bootstraps=50, confidence=0.5)
+    if analysis_to_run['diffusion_coefficient']:
+        # calculate MSDs and diffusion coefficients
+        print('\nCalculating water MSD and diffusion coefficients in membrane')
+        diff = DiffusionCoefficient(tpr, xtc, water='type OW')
+        # frac, waters = diff.restrict_to_membrane(diff.water, membrane_fraction=(0.25, 0.75))
+        # D, D_ci = diff.run(waters, n_bootstraps=50, confidence=0.5)
 
-    # save to MSD to CSV
-    msd_csv = path + 'water_msd.csv'
-    np.savetxt(msd_csv, np.column_stack((diff.lagtimes, diff.msd_ts, diff.msd_stderr, diff.msd_ci[0,:], diff.msd_ci[1,:])), delimiter=',', header='time,msd,stderr,lower_ci,upper_ci', comments='', fmt='%.6f')
-    print(f'Wrote water MSD to {msd_csv}')
+        D, D_ci = diff.run(diff.water, n_bootstraps=50, confidence=0.5)
+        save_object(diff, path + 'diffusion_coefficient_unrestricted.pkl')
 
-    print(f'Diffusion coefficient: {D:.4e} with CI ({D_ci[0]:.4e}, {D_ci[1]:.4e})')
+        # save to MSD to CSV
+        msd_csv = path + 'water_msd_unrestricted.csv'
+        np.savetxt(msd_csv, np.column_stack((diff.lagtimes, diff.msd_ts, diff.msd_stderr, diff.msd_ci[0], diff.msd_ci[1])), delimiter=',', header='time,msd,stderr,lower_ci,upper_ci', comments='', fmt='%.6f')
+        print(f'Wrote water MSD to {msd_csv}')
 
-    # merge pore size distribution data from all frames
-    print('\nAveraging pore size distributions')
-    frames = natsorted(glob(path + 'poreblazer/frame*/Total_psd.txt'))
-    bins, psd, std = average_PSD(frames)
+        print(f'Diffusion coefficient: {D*10**-9:.4e} m^2/s with CI ({D_ci[0]*10**-9:.4e}, {D_ci[1]*10**-9:.4e})')
 
-    # save to CSV
-    psd_csv = path + 'average_psd.csv'
-    np.savetxt(psd_csv, np.column_stack((bins, psd, std)), delimiter=',', header='pore_diameter_A,average_psd,std_dev', comments='', fmt='%.6f')
-    print(f'Wrote average PSD to {psd_csv}')
+    if analysis_to_run['pore_size_distribution']:
+        # merge pore size distribution data from all frames
+        print('\nAveraging pore size distributions')
+        frames = natsorted(glob(path + 'poreblazer/frame*/Total_psd.txt'))
+        bins, psd, std = average_PSD(frames)
 
-    print(f'Max in the PSD is at {bins[np.argmax(psd)]:.2f} Angstroms')
+        # save to CSV
+        psd_csv = path + 'average_psd.csv'
+        np.savetxt(psd_csv, np.column_stack((bins, psd, std)), delimiter=',', header='pore_diameter_A,average_psd,std_dev', comments='', fmt='%.6f')
+        print(f'Wrote average PSD to {psd_csv}')
+
+        print(f'Max in the PSD is at {bins[np.argmax(psd)]:.2f} Angstroms')
+
+    if analysis_to_run['density_profiles']:
+        # calculate density profiles and average densities
+        print('\nCalculating density profiles and average densities')
+        bins, water_density_profile, polymer_density_profile, water_density, total_density = calculate_density(u, membrane_lb=membrane_bounds[:,0].mean(), membrane_ub=membrane_bounds[:,1].mean(), frameby=1, bin_width=0.5)
+
+        # save both profiles and time series to CSV
+        density_csv = path + 'density.csv'
+        density_out = np.column_stack((time, water_density, total_density))
+        np.savetxt(density_csv, density_out, delimiter=',', header='time,water_density,total_density', comments='', fmt='%.6f')
+        print(f'Wrote average densities to {density_csv}')
+
+        density_profile_csv = path + 'density_profiles.csv'
+        density_profile_out = np.column_stack((bins[1:], water_density_profile, polymer_density_profile))
+        np.savetxt(density_profile_csv, density_profile_out, delimiter=',', header='z,water_density_profile,polymer_density_profile', comments='', fmt='%.6f')
+        print(f'Wrote density profiles to {density_profile_csv}')
+    

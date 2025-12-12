@@ -284,9 +284,9 @@ class DiffusionCoefficient:
             is_inside[i,:] = is_inside[i,:] // 2
 
         # convert the tracking array into a fraction of time spent in membrane
-        frac_inside = is_inside.sum(axis=0) / len(self.universe.trajectory)
+        self.frac_inside = is_inside.sum(axis=0) / len(self.universe.trajectory)
 
-        return frac_inside, ag[frac_inside >= frac]
+        return self.frac_inside, ag[self.frac_inside >= frac]
     
 
     def _power_law_func(self, t, A, alpha):
@@ -394,8 +394,8 @@ class DiffusionCoefficient:
         
         ax.plot(self.lagtimes[:end_idx], self.msd_ts[:end_idx])
         ax.fill_between(self.lagtimes[:end_idx], 
-                        self.msd_ts[:end_idx]-self.msd_ci[0][:end_idx], 
-                        self.msd_ts[:end_idx]+self.msd_ci[1][:end_idx], alpha=0.5)
+                        self.msd_ci[0][:end_idx], 
+                        self.msd_ci[1][:end_idx], alpha=0.5)
 
         ax.set_xlabel('time lag (ns)')
         ax.set_ylabel('MSD (nm$^2$)')

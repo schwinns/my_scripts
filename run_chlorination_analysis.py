@@ -13,6 +13,7 @@ import MDAnalysis as mda
 from ParallelMDAnalysis import ParallelInterRDF as InterRDF
 from MDAnalysis.analysis.hydrogenbonds.hbond_analysis import HydrogenBondAnalysis as HBA
 from diffusion_coefficient import DiffusionCoefficient
+from solvation_analysis.solute import Solute
 
 
 def save_object(obj, filename):
@@ -193,14 +194,48 @@ def calculate_density(universe, membrane_lb=40, membrane_ub=100, frameby=10, bin
     return bins, water_density_profile, polymer_density_profile, water_density, total_density
 
 
+def coordination_analysis(universe):
+    '''Get the coordination environment around water molecules in the membrane'''
+
+    waters = universe.select_atoms('type OW') # only water oxygen atoms
+    cations = universe.select_atoms('resname NA')
+    anions = universe.select_atoms('resname CL')
+
+    xlink_c = universe.select_atoms(f'(type c) and (bonded type n)')
+    coo_c = universe.select_atoms(f'(type c) and (not bonded type oh n)')
+
+    cooh_oh = universe.select_atoms(f'type oh')
+    amide_o = universe.select_atoms(f'(type o) and (bonded group xlink_c)', xlink_c=xlink_c)
+    coo_o = universe.select_atoms(f'(type o) and (bonded group coo_c)', coo_c=coo_c)
+    nh2 = universe.select_atoms(f'type nh')
+    cl = universe.select_atoms('type cl')
+
+    solute = Solute.from_atoms(waters,
+                        {
+                            'amide_o' : amide_o,
+                            'cooh_oh' : cooh_oh,
+                            'coo_o' : coo_o,
+                            'nh2' : nh2,
+                            'anions' : anions,
+                            'cations' : cations,
+                            'cl' : cl
+                        },
+                        solute_name='Water', radii={'nh2' : 4.0, 'anions' : 3.95, 'cl' : 5.1})
+
+    solute.run()
+
+    return solute
+
+
 if __name__ == "__main__":
 
-    analysis_to_run = {'hydrogen_bonds': True,
-                       'volume' : True,
-                       'rdfs': True,
-                       'diffusion_coefficient': True,
-                       'pore_size_distribution': True,
-                       'density_profiles': True}
+    analysis_to_run = {'hydrogen_bonds': False,
+                       'volume' : False,
+                       'rdfs': False,
+                       'diffusion_coefficient': False,
+                       'pore_size_distribution': False,
+                       'density_profiles': False, 
+                       'coordination' : True}
     path = './'
     tpr = path + 'prod.tpr'
     xtc = path + 'prod_centered.xtc'
@@ -237,7 +272,13 @@ if __name__ == "__main__":
         np.savetxt(volume_csv, vol_out, delimiter=',', header='time,membrane_volume_A3', comments='', fmt='%.6f')
         print(f'Wrote membrane volume to {volume_csv}')
 
+        bounds_csv = path + 'membrane_bounds.csv'
+        bounds_out = np.column_stack((time, membrane_bounds))
+        np.savetxt(bounds_csv, bounds_out, delimiter=',', header='time,membrane_lower_bound_A,membrane_upper_bound_A', comments='', fmt='%.6f')
+        print(f'Wrote membrane bounds to {bounds_csv}')
+
         print(f'Average membrane volume: {volume.mean():.2f} A^3')
+        print(f'Average membrane bounds: {membrane_bounds.mean(axis=0)} A')
 
     if analysis_to_run['rdfs']:
         # calculate RDFs
@@ -294,4 +335,16 @@ if __name__ == "__main__":
         density_profile_out = np.column_stack((bins[1:], water_density_profile, polymer_density_profile))
         np.savetxt(density_profile_csv, density_profile_out, delimiter=',', header='z,water_density_profile,polymer_density_profile', comments='', fmt='%.6f')
         print(f'Wrote density profiles to {density_profile_csv}')
+
+
+    if analysis_to_run['coordination']:
+
+        # calculate coordination environment around water molecules
+        print('\nCalculating coordination environment around water molecules')
+        solute = coordination_analysis(u)
+
+        # save to pickle
+        coord_pkl = path + 'water_coordination.pkl'
+        save_object(solute, coord_pkl)
+        print(f'Wrote water coordination analysis to {coord_pkl}')
     

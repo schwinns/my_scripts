@@ -477,14 +477,11 @@ if __name__ == "__main__":
 
     if analysis_to_run['rdfs']:
 
-        if not analysis_to_run['volume']:
-            # need membrane bounds to restrict RDF calculation to bulk membrane
-            print('\nCalculating bulk membrane volume for RDF calculation')
-            _, _, membrane_bounds = calculate_volume(u)
+        membrane_bounds = determine_membrane_bounds(u)
 
         # calculate RDFs
         print('\nCalculating RDFs for water in membrane')
-        rdfs = calculate_RDFs(u, membrane_lower_bound=membrane_bounds[:,0].mean(), membrane_upper_bound=membrane_bounds[:,1].mean(), njobs=16)
+        rdfs = calculate_RDFs(u, membrane_lower_bound=membrane_bounds[1], membrane_upper_bound=membrane_bounds[3], njobs=16)
 
         # save to CSV
         rdfs_csv = path + 'rdfs.csv'
@@ -495,16 +492,25 @@ if __name__ == "__main__":
         # calculate MSDs and diffusion coefficients
         print('\nCalculating water MSD and diffusion coefficients in membrane')
         diff = DiffusionCoefficient(tpr, xtc, water='type OW')
-        frac, waters = diff.restrict_to_membrane(diff.water, membrane_fraction=(0, 1))
+        frac, waters = diff.restrict_to_membrane(diff.water, frac=0.8, membrane_bounds=(membrane_bounds[0], membrane_bounds[-1]))
         D, D_ci = diff.run(waters, n_bootstraps=50, confidence=0.5)
         print(f'{len(waters)} waters stay in the membrane')
         save_object(diff, path + 'diffusion_coefficient.pkl')
 
-        # D, D_ci = diff.run(diff.water, n_bootstraps=50, confidence=0.5)
-        # save_object(diff, path + 'diffusion_coefficient_unrestricted.pkl')
-
         # save to MSD to CSV
         msd_csv = path + 'water_msd.csv'
+        np.savetxt(msd_csv, np.column_stack((diff.lagtimes, diff.msd_ts, diff.msd_stderr, diff.msd_ci[0], diff.msd_ci[1])), delimiter=',', header='time,msd,stderr,lower_ci,upper_ci', comments='', fmt='%.6f')
+        print(f'Wrote water MSD to {msd_csv}')
+
+        print(f'Diffusion coefficient: {D*10**-9:.4e} m^2/s with CI ({D_ci[0]*10**-9:.4e}, {D_ci[1]*10**-9:.4e})')
+
+        # for unrestricted waters
+        diff = DiffusionCoefficient(tpr, xtc, water='type OW')
+        D, D_ci = diff.run(diff.water, n_bootstraps=50, confidence=0.5)
+        save_object(diff, path + 'diffusion_coefficient_unrestricted.pkl')
+
+        # save to MSD to CSV
+        msd_csv = path + 'water_msd_unrestricted.csv'
         np.savetxt(msd_csv, np.column_stack((diff.lagtimes, diff.msd_ts, diff.msd_stderr, diff.msd_ci[0], diff.msd_ci[1])), delimiter=',', header='time,msd,stderr,lower_ci,upper_ci', comments='', fmt='%.6f')
         print(f'Wrote water MSD to {msd_csv}')
 
@@ -524,11 +530,6 @@ if __name__ == "__main__":
         print(f'Max in the PSD is at {bins[np.argmax(psd)]:.2f} Angstroms')
 
     if analysis_to_run['density_profiles']:
-
-        if not analysis_to_run['volume']:
-            # need membrane bounds to restrict RDF calculation to bulk membrane
-            print('\nCalculating bulk membrane volume for RDF calculation')
-            _, _, membrane_bounds = calculate_volume(u)
 
         # calculate density profiles and average densities
         print('\nCalculating density profiles and average densities')

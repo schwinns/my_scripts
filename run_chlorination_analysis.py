@@ -14,12 +14,133 @@ from ParallelMDAnalysis import ParallelInterRDF as InterRDF
 from MDAnalysis.analysis.hydrogenbonds.hbond_analysis import HydrogenBondAnalysis as HBA
 from diffusion_coefficient import DiffusionCoefficient
 from solvation_analysis.solute import Solute
+from monomer_classes import MPD, MPD_Cl_T, TMC
 
 
 def save_object(obj, filename):
     '''Save object to pickle file'''
     with open(filename, 'wb') as output:
         pickle.dump(obj, output, pickle.HIGHEST_PROTOCOL)
+
+
+def create_MPD_fragments(universe):
+    '''Create MPD fragment objects'''
+
+    mpds = []
+    Ns = []
+    for N in tqdm(universe.atoms.select_atoms('type n nh')):
+
+        has_cl = 'cl' in N.bonded_atoms.types
+
+        if not has_cl: # check other N
+            my_ca = [atom for atom in N.bonded_atoms if atom.type == 'ca'][0] # get connected aromatic C
+            next_ca = [atom for atom in my_ca.bonded_atoms if atom.type == 'ca'] # get next aromatic C
+            for ca in next_ca:
+                next_next_ca = [atom for atom in ca.bonded_atoms if atom != my_ca and atom.type == 'ca'][0]
+                if 'N' in next_next_ca.bonded_atoms.elements:
+                    n = [atom for atom in next_next_ca.bonded_atoms if atom.element == 'N'][0]
+                    break
+
+            has_cl = 'cl' in n.bonded_atoms.types
+
+        if has_cl:
+            mpd = MPD_Cl_T(N, cl='cl', xlink_n='n', ar_c='ca', term_n='nh', ar_h='ha', hn='hn')
+        else:
+            mpd = MPD(N, xlink_n='n', ar_c='ca', term_n='nh', ar_h='ha', hn='hn')
+
+        if mpd.N2 not in Ns:
+            mpds.append(mpd)
+        
+        Ns.append(mpd.N1)
+        Ns.append(mpd.N2)
+
+    # convert to atom groups
+    all_mpds = mda.AtomGroup([a for mpd in mpds for a in mpd.atoms])
+
+    for mpd in mpds:
+        mpd.atoms = mda.AtomGroup(mpd.atoms)
+
+    return mpds, all_mpds
+
+
+def create_TMC_fragments(universe):
+    '''Create TMC fragment objects'''
+
+    tmcs = []
+    Cs = []
+    for C in tqdm(u.atoms.select_atoms('type c')):
+        tmc = TMC(C, ar_c='ca', xlink_c='c', ar_h='ha', deprot_o='o', prot_o='oh', ho_type='ho')
+        if tmc.C2 not in Cs and tmc.C3 not in Cs:
+            tmcs.append(tmc)
+
+        Cs.append(tmc.C1)
+        Cs.append(tmc.C2)
+        Cs.append(tmc.C3)
+
+    # convert to atom groups
+    all_tmcs = mda.AtomGroup([a for tmc in tmcs for a in tmc.atoms])
+
+    for tmc in tmcs:
+        tmc.atoms = mda.AtomGroup(tmc.atoms)
+
+
+def determine_membrane_bounds(universe, weighted='number', return_hist=False):
+    '''Determine membrane bounds based on intersection of the polymer desnity and water density profiles'''
+
+    water = universe.select_atoms('resname SOL')
+    polymer = universe.select_atoms('resname PA*')
+
+    max_dims = max([ts.dimensions[2] for ts in u.trajectory])
+
+    bin_width = 1
+    water_hist = np.histogram([], bins=np.arange(0, max_dims+bin_width, bin_width))[0].astype(np.float64)
+    polymer_hist = np.histogram([], bins=np.arange(0, max_dims+bin_width, bin_width))[0].astype(np.float64)
+
+    for ts in tqdm(universe.trajectory):
+        # Recalculate histograms
+        hist, b = np.histogram(water.positions[:,2], bins=np.arange(0, max_dims+bin_width, bin_width), weights=water.masses if weighted == 'mass' else None)
+        hist = hist.astype(np.float64) / (bin_width * ts.dimensions[0] * ts.dimensions[1])
+        water_hist += hist
+        water_bin_centers = 0.5 * (b[:-1] + b[1:])
+
+        hist, b = np.histogram(polymer.positions[:,2], bins=np.arange(0, max_dims+bin_width, bin_width), weights=polymer.masses if weighted == 'mass' else None)
+        hist = hist.astype(np.float64) / (bin_width * ts.dimensions[0] * ts.dimensions[1])
+        polymer_hist += hist
+
+    # Average over frames
+    water_hist /= universe.trajectory.n_frames
+    polymer_hist /= universe.trajectory.n_frames
+
+    # Find intersections by checking sign changes of the difference
+    difference = water_hist - polymer_hist
+    sign_changes = np.where(np.diff(np.sign(difference)))[0]
+
+    print(f"Found {len(sign_changes)} intersection points:")
+    intersections = []
+    for idx in sign_changes:
+        # Linear interpolation to find more precise intersection
+        z1, z2 = water_bin_centers[idx], water_bin_centers[idx + 1]
+        d1, d2 = difference[idx], difference[idx + 1]
+        
+        # Interpolate
+        z_intersect = z1 - d1 * (z2 - z1) / (d2 - d1)
+        density_intersect = np.interp(z_intersect, water_bin_centers, water_hist)
+        
+        intersections.append((z_intersect, density_intersect))
+        print(f"  Z = {z_intersect:.2f} Å, Density = {density_intersect:.4f} amu/Å³")
+
+    # Mark intersections
+    if intersections:
+        z_intersects = [pt[0] for pt in intersections]
+        d_intersects = [pt[1] for pt in intersections]
+
+    membrane_bounds = np.linspace(intersections[0][0], intersections[-1][0], 5) # split membrane into quarters
+    print(f'Membrane bounds (Z): {membrane_bounds}')
+
+    if return_hist:
+        return membrane_bounds, water_hist, polymer_hist
+    else:
+        return membrane_bounds
 
 
 def hydrogen_bonds(universe, donors_sel='(type n) or (type nh)', acceptors_sel='(type o)', hydrogens_sel='(type hn)'):
@@ -118,82 +239,58 @@ def average_PSD(frames):
     return bins, psd_mean, psd_std
 
 
-def calculate_density(universe, membrane_lb=40, membrane_ub=100, frameby=10, bin_width=0.5):
+def calculate_density(universe, bin_width=0.5):
     '''Calculate density profiles for different species and average density of bulk membrane'''
 
-    dim = 'z' # z-dimension
-    d = 2
-    box = universe.dimensions[d]
+    # get density profiles and membrane bounds
+    max_dims = max([ts.dimensions[2] for ts in universe.trajectory])
+    bins = np.arange(0, max_dims+bin_width, bin_width)
+    bin_centers = 0.5 * (bins[:-1] + bins[1:])
 
-    water = universe.select_atoms('resname SOL')
-    polymer = universe.select_atoms('resname PA*')
+    membrane_bounds, water_density_profile, polymer_density_profile = determine_membrane_bounds(universe, return_hist=True)
 
-    n_bins = int(box / bin_width)
-    bins = np.linspace(0, box, num=n_bins)
+    # get MPD and TMC fragments
+    mpds, all_mpds = create_MPD_fragments(universe)
+    tmcs, all_tmcs = create_TMC_fragments(universe)
 
-    water_density_profile = np.zeros(n_bins-1)
-    polymer_density_profile = np.zeros(n_bins-1)
-    number_density_profile = np.zeros((n_bins-1, 2)) # water, polymer
-    water_density = np.zeros(len(universe.trajectory[::frameby]))
-    total_density = np.zeros(len(universe.trajectory[::frameby]))
-    total_number_density = np.zeros(len(universe.trajectory[::frameby]))
+    # calculate bulk membrane density time series
+    water_density = np.zeros((u.trajectory.n_frames, 4)) # time, xy, number, mass
+    polymer_density = np.zeros((u.trajectory.n_frames, 10)) # time, xy, total number, total mass, MPD number, MPD mass, MPD frags, TMC number, TMC mass, TMC frags
 
-    for i, ts in enumerate(tqdm(universe.trajectory[::frameby])):
+    for i,ts in tqdm(enumerate(u.trajectory)):
+        bulk_membrane = u.select_atoms(f'prop z < {membrane_bounds[1]} or prop z > {membrane_bounds[3]}')
+        my_water = bulk_membrane.select_atoms('resname SOL')
+        my_polymer = bulk_membrane.select_atoms('resname PA*')
+        my_MPD = all_mpds & my_polymer
+        my_TMC = all_tmcs & my_polymer
 
-        sel = universe.select_atoms(f'prop {dim} > {membrane_lb} and prop {dim} < {membrane_ub}')
+        n_mpd = len([mpd for mpd in mpds if mpd.atoms.issubset(my_MPD)])
+        n_tmc = len([tmc for tmc in tmcs if tmc.atoms.issubset(my_TMC)])
 
-        # calculate density profiles
-        box = universe.dimensions
-        for b in range(n_bins-1):
-            lb = bins[b]
-            ub = bins[b+1]
+        xy = (ts.dimensions[0] * ts.dimensions[1]) # Angstroms^2
 
-            box_dims = [box[i] for i in range(3) if i != d]
-            dV = box_dims[0] * box_dims[1] * (ub-lb) * (10**-8)**3
-            
-            bin_atoms = universe.select_atoms(f'prop {dim} > {lb} and prop {dim} < {ub} and group water', water=water)
-            mass = bin_atoms.masses.sum() / 6.022 / 10**23
-            water_density_profile[b] += mass / dV
-            number_density_profile[b,0] += bin_atoms.n_atoms / dV
+        water_density[i,0] = ts.time
+        water_density[i,1] = xy
+        water_density[i,2] = my_water.n_atoms # number
+        water_density[i,3] = my_water.total_mass() # mass
 
-            bin_atoms = universe.select_atoms(f'prop {dim} > {lb} and prop {dim} < {ub} and group polymer', polymer=polymer)
-            mass = bin_atoms.masses.sum() / 6.022 / 10**23
-            polymer_density_profile[b] += mass / dV
-            number_density_profile[b,1] += bin_atoms.n_atoms / dV
+        polymer_density[i,0] = ts.time
+        polymer_density[i,1] = xy
+        polymer_density[i,2] = my_polymer.n_atoms
+        polymer_density[i,3] = my_polymer.total_mass()
+        polymer_density[i,4] = my_MPD.n_atoms
+        polymer_density[i,5] = my_MPD.total_mass()
+        polymer_density[i,6] = n_mpd
+        polymer_density[i,7] = my_TMC.n_atoms
+        polymer_density[i,8] = my_TMC.total_mass()
+        polymer_density[i,9] = n_tmc
 
-        # calculate the water density in the bulk region as a time series
-        g = sel.select_atoms('resname SOL')
-        xlo, xhi = g.positions[:,0].min(), g.positions[:,0].max() # NOTE: these limits will be slightly different than self.box
-        ylo, yhi = g.positions[:,1].min(), g.positions[:,1].max() #       since it is using the min and max atom coordinates, but
-        zlo, zhi = g.positions[:,2].min(), g.positions[:,2].max() #       the difference should only be at most 0.002
 
-        total_mass = g.masses.sum() / 6.022 / 10**23 # [g/mol * mol/# = g]
-        s1 = (xhi-xlo) * 10**-8 # [Ang * 10^8 cm/Ang = cm]
-        s2 = (yhi-ylo) * 10**-8 # cm
-        s3 = (zhi-zlo) * 10**-8 # cm
-        vol = s1*s2*s3 # cm^3
-        density = total_mass / vol
-        water_density[i] = density
+    df_water = pd.DataFrame(water_density, columns=['time', 'area', 'water_number', 'water_mass'])
+    df_polymer = pd.DataFrame(polymer_density, columns=['time', 'area', 'polymer_number', 'polymer_mass', 'MPD_number', 'MPD_mass', 'MPD_frags', 'TMC_number', 'TMC_mass', 'TMC_frags'])
+    density_df = pd.merge(df_water, df_polymer, on=['time', 'area'])
 
-        # calculate the total density in the bulk region as a time series
-        g = sel
-        xlo, xhi = g.positions[:,0].min(), g.positions[:,0].max() # NOTE: these limits will be slightly different than self.box
-        ylo, yhi = g.positions[:,1].min(), g.positions[:,1].max() #       since it is using the min and max atom coordinates, but
-        zlo, zhi = g.positions[:,2].min(), g.positions[:,2].max() #       the difference should only be at most 0.002
-
-        total_mass = g.masses.sum() / 6.022 / 10**23 # [g/mol * mol/# = g]
-        s1 = (xhi-xlo) * 10**-8 # [Ang * 10^8 cm/Ang = cm]
-        s2 = (yhi-ylo) * 10**-8 # cm
-        s3 = (zhi-zlo) * 10**-8 # cm
-        vol = s1*s2*s3 # cm^3
-        density = total_mass / vol
-        total_density[i] = density
-        total_number_density[i] = g.n_atoms / vol
-
-    water_density_profile = water_density_profile / len(universe.trajectory[::frameby])
-    polymer_density_profile = polymer_density_profile / len(universe.trajectory[::frameby])
-
-    return bins, water_density_profile, polymer_density_profile, number_density_profile, water_density, total_density, total_number_density
+    return bin_centers, water_density_profile, polymer_density_profile, density_df
 
 
 def coordination_analysis(universe):
@@ -435,17 +532,16 @@ if __name__ == "__main__":
 
         # calculate density profiles and average densities
         print('\nCalculating density profiles and average densities')
-        bins, water_density_profile, polymer_density_profile, number_density_profile, water_density, total_density, total_number_density = calculate_density(u, membrane_lb=membrane_bounds[:,0].mean(), membrane_ub=membrane_bounds[:,1].mean(), frameby=1, bin_width=0.5)
+        bins, water_density_profile, polymer_density_profile, density_df = calculate_density(u, bin_width=1)
 
         # save both profiles and time series to CSV
         density_csv = path + 'density.csv'
-        density_out = np.column_stack((time, water_density, total_density, total_number_density))
-        np.savetxt(density_csv, density_out, delimiter=',', header='time,water_density,total_density,total_number_density', comments='', fmt='%.6f')
+        density_df.to_csv(density_csv, index=False)
         print(f'Wrote average densities to {density_csv}')
 
         density_profile_csv = path + 'density_profiles.csv'
-        density_profile_out = np.column_stack((bins[1:], water_density_profile, polymer_density_profile, number_density_profile[:,0], number_density_profile[:,1]))
-        np.savetxt(density_profile_csv, density_profile_out, delimiter=',', header='z,water_density_profile,polymer_density_profile,water_number_density_profile,polymer_number_density_profile', comments='', fmt='%.6f')
+        density_profile_out = np.column_stack((bins[1:], water_density_profile, polymer_density_profile))
+        np.savetxt(density_profile_csv, density_profile_out, delimiter=',', header='z,water_density_profile,polymer_density_profile', comments='', fmt='%.6f')
         print(f'Wrote density profiles to {density_profile_csv}')
 
 

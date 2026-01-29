@@ -77,7 +77,7 @@ def plot_colored_line(x, y, c, ax, **lc_kwargs): # from https://matplotlib.org/s
     return ax.add_collection(lc)
 
 
-def plot_xyz_trajectories(x, y, z, t, c=None, c_label=None, ax=None, lc_kwargs={}, cbar_kwargs={}):
+def plot_xyz_trajectories(x, y, z, t, c=None, c_label=None, ax=None, lc_kwargs={}, cbar_kwargs={}, return_cbar=False):
     '''
     Plot x, y, and z trajectories as a time series colored by a separate variable c
     
@@ -103,13 +103,15 @@ def plot_xyz_trajectories(x, y, z, t, c=None, c_label=None, ax=None, lc_kwargs={
         that is set to the color argument. If provided, it will be overridden.
     cbar_kwargs : dict
         Any additional arguments to pass to matplotlib.colorbar
+    return_bar : bool, optional
+        Whether to return the colorbar. Default = False
 
     Returns
     -------
-    fig : matplotlib figure
-        Figure with the trajectories plotted
     ax : matplotlib axis
         Axis with the trajectories plotted
+    cbar : matplotlib colorbar
+        Optional return if return_cbar is True
 
     '''
 
@@ -125,12 +127,14 @@ def plot_xyz_trajectories(x, y, z, t, c=None, c_label=None, ax=None, lc_kwargs={
         ax[d].set_ylabel(f'{dim} coordinate ($\AA$)')
         ax[d].set_ylim(traj[d].min(), traj[d].max())
 
-    fig.colorbar(line, ax=ax[:], location='right', label=c_label, fraction=0.046, pad=0.04, **cbar_kwargs)
+    cbar = fig.colorbar(line, ax=ax[:], location='right', label=c_label, fraction=0.046, pad=0.04, **cbar_kwargs)
     ax[2].set_xlabel('time (ns)')
     ax[2].set_xlim(0, t.max())
 
-    return ax
-
+    if return_cbar:
+        return ax, cbar
+    else:
+        return ax
 
 class IonDynamics:
 

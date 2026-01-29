@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 class DiffusionCoefficient:
 
-    def __init__(self, top, traj, membrane='resname PA*', water='resname SOL', cation='resname NA', anion='resname CL'):
+    def __init__(self, top, traj, membrane='resname PA*', water='resname SOL', cation='resname NA', anion='resname CL', transform=True):
         '''
         Class to calculate the diffusion coefficient from a trajectory.
 
@@ -32,6 +32,8 @@ class DiffusionCoefficient:
             MDAnalysis selection language for the cation, default='resname NA'
         anion : str
             MDAnalysis selection language for the anion, default='resname CL'
+        transform : bool
+            Whether to apply trajectory transformations (centering, unwrapping, nojump), default=True
         
         '''
 
@@ -46,17 +48,19 @@ class DiffusionCoefficient:
             # create a workflow for on-the-fly transformations
             workflow = []
             
-            # if membrane is present, center around membrane
-            if len(self.PA) > 0:
-                workflow.append(trans.unwrap(self.universe.atoms))
-                workflow.append(trans.center_in_box(self.PA, center='mass'))
-                workflow.append(trans.wrap(self.universe.atoms))
+            if transform:
 
-            # no jump trajectory unwrapping, necessary for diffusion coefficient calculations
-            workflow.append(trans.nojump.NoJump())
+                # if membrane is present, center around membrane
+                if len(self.PA) > 0:
+                    workflow.append(trans.unwrap(self.universe.atoms))
+                    workflow.append(trans.center_in_box(self.PA, center='mass'))
+                    workflow.append(trans.wrap(self.universe.atoms))
 
-            # add transformations
-            self.universe.trajectory.add_transformations(*workflow)
+                # no jump trajectory unwrapping, necessary for diffusion coefficient calculations
+                workflow.append(trans.nojump.NoJump())
+
+                # add transformations
+                self.universe.trajectory.add_transformations(*workflow)
         
 
     def run(self, atom_group, n_bootstraps=0, confidence=0.95, msd_kwargs={}, fit_kwargs={}):
